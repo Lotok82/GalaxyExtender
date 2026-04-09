@@ -14,6 +14,7 @@
 #include "CellProperty.h"
 #include "CollisionWorld.h"
 #include "ObjectAttributeManager.h"
+#include "FoodDrinkMonitor.h"
 
 #define MEDICAL_ENHANCE_POISON 0x391AC375
 
@@ -30,6 +31,20 @@ void EmuCommandParser::initializeVtable() {
 float stof(const soe::unicode& str) {
 	try {
 		return std::stof(str.c_str());
+	} catch (...) {
+		return 0;
+	}
+}
+
+int parseHexOrDec(const soe::unicode& str) {
+	try {
+		const wchar_t* s = str.c_str();
+		if (s[0] == L'0' && (s[1] == L'x' || s[1] == L'X'))
+			return (int)wcstol(s, nullptr, 16);
+		else if ((s[0] >= L'A' && s[0] <= L'F') || (s[0] >= L'a' && s[0] <= L'f'))
+			return (int)wcstol(s, nullptr, 16);
+		else
+			return std::stoi(s);
 	} catch (...) {
 		return 0;
 	}
@@ -338,6 +353,190 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 		}
 
 		return true;
+	} else if (command == L"memscan") {
+		// Memory scanning tools for discovering PlayerObject field offsets
+		if (args.size() < 3) {
+			resultUnicode += L"\\#88ccffUsage:\\#ffffff\n";
+			resultUnicode += L"  /emu memscan snapshot — Save PlayerObject memory state\n";
+			resultUnicode += L"  /emu memscan diff — Compare current memory to snapshot\n";
+			resultUnicode += L"  /emu memscan search <int_value> — Find int32 in memory\n";
+			resultUnicode += L"  /emu memscan delta <hex_offset> — Read AutoDeltaVariable at offset\n";
+			resultUnicode += L"  /emu memscan dump <hex_offset> [byte_count] — Hex dump at offset\n";
+			return true;
+		}
+
+		auto& subcmd = args[2];
+
+		if (subcmd == L"snapshot" || subcmd == L"snap") {
+			if (FoodDrinkMonitor::takeSnapshot()) {
+				char msg[128];
+				sprintf_s(msg, sizeof(msg), "\\#00ff00Snapshot saved\\#ffffff (0x%X bytes from PlayerObject base)",
+					(unsigned)FoodDrinkMonitor::SCAN_RANGE);
+				resultUnicode += msg;
+			} else {
+				resultUnicode += L"\\#ff4444Failed to take snapshot.\\#ffffff PlayerObject null or memory access error.";
+			}
+		} else if (subcmd == L"diff") {
+			FoodDrinkMonitor::diffSnapshot(resultUnicode);
+		} else if (subcmd == L"search" || subcmd == L"find") {
+			if (args.size() < 4) {
+				resultUnicode += L"Usage: /emu memscan search <int_value>";
+				return true;
+			}
+			int value = parseHexOrDec(args[3]);
+			FoodDrinkMonitor::searchValue(value, resultUnicode);
+		} else if (subcmd == L"delta" || subcmd == L"adv") {
+			if (args.size() < 4) {
+				resultUnicode += L"Usage: /emu memscan delta <hex_offset>";
+				return true;
+			}
+			int offset = parseHexOrDec(args[3]);
+			FoodDrinkMonitor::readDelta(offset, resultUnicode);
+		} else if (subcmd == L"dump") {
+			if (args.size() < 4) {
+				resultUnicode += L"Usage: /emu memscan dump <hex_offset> [byte_count]";
+				return true;
+			}
+			int offset = parseHexOrDec(args[3]);
+			int count = args.size() > 4 ? parseHexOrDec(args[4]) : 64;
+			FoodDrinkMonitor::dumpMemory(offset, count, resultUnicode);
+		} else {
+			resultUnicode += L"Unknown memscan subcommand. Use /emu memscan for help.";
+		}
+
+		return true;
+	} else if (command == L"monitor") {
+		// Food/Drink monitor runtime configuration
+		if (args.size() < 3) {
+			resultUnicode += L"\\#88ccffFood/Drink Monitor:\\#ffffff\n";
+			char status[256];
+			sprintf_s(status, sizeof(status),
+				"  Status: %s | Offsets: %s\n",
+				FoodDrinkMonitor::isEnabled() ? "\\#00ff00ON\\#ffffff" : "\\#ff4444OFF\\#ffffff",
+				FoodDrinkMonitor::isConfigured() ? "\\#00ff00configured\\#ffffff" : "\\#ff4444not set\\#ffffff");
+			resultUnicode += status;
+			if (FoodDrinkMonitor::isConfigured() && FoodDrinkMonitor::isEnabled()) {
+				sprintf_s(status, sizeof(status),
+					"  Food: %d/%d  Drink: %d/%d\n",
+					FoodDrinkMonitor::getFood(), FoodDrinkMonitor::getMaxFood(),
+					FoodDrinkMonitor::getDrink(), FoodDrinkMonitor::getMaxDrink());
+				resultUnicode += status;
+			}
+			resultUnicode += L"\\#88ccffCommands:\\#ffffff\n";
+			resultUnicode += L"  /emu monitor on — Enable polling\n";
+			resultUnicode += L"  /emu monitor off — Disable polling\n";
+			resultUnicode += L"  /emu monitor setoffsets <food> <maxFood> <drink> <maxDrink> — Set AutoDelta base offsets (hex)\n";
+			resultUnicode += L"  /emu monitor status — Show current cached values\n";
+			return true;
+		}
+
+		auto& subcmd = args[2];
+
+		if (subcmd == L"on") {
+			if (!FoodDrinkMonitor::isConfigured()) {
+				resultUnicode += L"\\#ff4444Offsets not configured.\\#ffffff Use /emu monitor setoffsets first.";
+			} else {
+				FoodDrinkMonitor::enable();
+				FoodDrinkMonitor::poll(); // immediate first poll
+				resultUnicode += L"\\#00ff00Monitor enabled.\\#ffffff Polling each frame.";
+			}
+		} else if (subcmd == L"off") {
+			FoodDrinkMonitor::disable();
+			resultUnicode += L"Monitor disabled.";
+		} else if (subcmd == L"status") {
+			char msg[512];
+			PlayerObject* po = Game::getPlayerObject();
+			int directFood = po ? po->getFood() : -99;
+			int directDrink = po ? po->getDrink() : -99;
+			sprintf_s(msg, sizeof(msg),
+				"Enabled: %s  Configured: %s\nMonitor cache - Food: %d/%d  Drink: %d/%d\n"
+				"Direct read  - Food: %d  Drink: %d\n"
+				"UI widgets: %s (lookup attempts: %d)",
+				FoodDrinkMonitor::isEnabled() ? "yes" : "no",
+				FoodDrinkMonitor::isConfigured() ? "yes" : "no",
+				FoodDrinkMonitor::getFood(), FoodDrinkMonitor::getMaxFood(),
+				FoodDrinkMonitor::getDrink(), FoodDrinkMonitor::getMaxDrink(),
+				directFood, directDrink,
+				FoodDrinkMonitor::isUIFound() ? "\\#00ff00found\\#ffffff" : "\\#ff4444not found\\#ffffff",
+				FoodDrinkMonitor::getUILookupAttempts());
+			resultUnicode += msg;
+		} else if (subcmd == L"setoffsets") {
+			if (args.size() < 7) {
+				resultUnicode += L"Usage: /emu monitor setoffsets <food> <maxFood> <drink> <maxDrink>\n";
+				resultUnicode += L"Offsets are hex, pointing to AutoDeltaVariable base in PlayerObject.\n";
+				resultUnicode += L"Example: /emu monitor setoffsets 0x2A0 0x2B8 0x2D0 0x2E8";
+				return true;
+			}
+			int f = parseHexOrDec(args[3]);
+			int mf = parseHexOrDec(args[4]);
+			int d = parseHexOrDec(args[5]);
+			int md = parseHexOrDec(args[6]);
+			FoodDrinkMonitor::setOffsets(f, mf, d, md);
+
+			char msg[256];
+			sprintf_s(msg, sizeof(msg),
+				"\\#00ff00Offsets set:\\#ffffff food=0x%X maxFood=0x%X drink=0x%X maxDrink=0x%X",
+				(unsigned)f, (unsigned)mf, (unsigned)d, (unsigned)md);
+			resultUnicode += msg;
+		} else {
+			resultUnicode += L"Unknown monitor subcommand. Use /emu monitor for help.";
+		}
+
+		return true;
+	} else if (command == L"findui") {
+		// Debug tool: test UI paths to find where a widget lives
+		UIManager* mgr = UIManager::gUIManager();
+		if (!mgr) { resultUnicode += L"UIManager is null"; return true; }
+		UIPage* root = mgr->GetRootPage();
+		if (!root) { resultUnicode += L"Root page is null"; return true; }
+
+		soe::unicode searchName = (args.size() > 2) ? args[2] : soe::unicode("food");
+
+		static const char* prefixes[] = {
+			"", "netStatus.", "netStatus.comp.", "netStatus.comp.food.",
+			"netStatus.comp.drink.", "PDA.", "PDA.netStatus.", "PDA.netStatus.comp.",
+			"pda.", "pdaRoot.", "page.netStatus.", "HUD.", "hud.",
+			nullptr
+		};
+
+		resultUnicode += L"\\#88ccffUI Path Search:\\#ffffff\n";
+		int found = 0;
+		for (int i = 0; prefixes[i]; ++i) {
+			char path[256];
+			sprintf_s(path, sizeof(path), "%s%s", prefixes[i], "text");
+			UIBaseObject* obj = root->GetObjectFromPath(path);
+			char line[300];
+			sprintf_s(line, sizeof(line), "  %s -> %s\n", path, obj ? "\\#00ff00FOUND\\#ffffff" : "---");
+			resultUnicode += line;
+			if (obj) found++;
+		}
+
+		// Also test the exact paths we use
+		static const char* exactPaths[] = {
+			"pda", "pda.netStatus", "pda.netStatus.comp",
+			"pda.netStatus.comp.food", "pda.netStatus.comp.food.text",
+			"pda.netStatus.comp.drink", "pda.netStatus.comp.drink.text",
+			"pda.netStatus.comp.ping", "pda.netStatus.comp.ping.text",
+			"pda.netStatus.comp.fps", "pda.netStatus.comp.fps.text",
+			"pda.netStatus.comp.food.label",
+			"workspace.pda.netStatus.comp.food.text",
+			"HudWindow.pda.netStatus.comp.food.text",
+			nullptr
+		};
+
+		resultUnicode += L"\\#88ccffExact paths:\\#ffffff\n";
+		for (int i = 0; exactPaths[i]; ++i) {
+			UIBaseObject* obj = root->GetObjectFromPath(exactPaths[i]);
+			char line[300];
+			sprintf_s(line, sizeof(line), "  %s -> %s\n", exactPaths[i], obj ? "\\#00ff00FOUND\\#ffffff" : "---");
+			resultUnicode += line;
+			if (obj) found++;
+		}
+
+		char summary[64];
+		sprintf_s(summary, sizeof(summary), "Total found: %d", found);
+		resultUnicode += summary;
+		return true;
 	} else if (command == L"stomach" || command == L"food" || command == L"drink") {
 		PlayerObject* playerObject = Game::getPlayerObject();
 
@@ -346,16 +545,31 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 			return true;
 		}
 
-		if (!playerObject->hasFoodDrinkAddresses()) {
-			resultUnicode += L"Food/Drink addresses not yet configured in PlayerObject.h. ";
-			resultUnicode += L"See the TODO comments for how to find them via reverse engineering.";
-			return true;
+		// Try monitor first (runtime-configured offsets), then compiled-in addresses
+		bool hasValues = false;
+		int food = 0, maxFood = 0, drink = 0, maxDrink = 0;
+
+		if (FoodDrinkMonitor::isEnabled() && FoodDrinkMonitor::isConfigured()) {
+			FoodDrinkMonitor::poll(); // ensure fresh values
+			food = FoodDrinkMonitor::getFood();
+			maxFood = FoodDrinkMonitor::getMaxFood();
+			drink = FoodDrinkMonitor::getDrink();
+			maxDrink = FoodDrinkMonitor::getMaxDrink();
+			hasValues = true;
+		} else if (playerObject->hasFoodDrinkAddresses()) {
+			food = playerObject->getFood();
+			maxFood = playerObject->getMaxFood();
+			drink = playerObject->getDrink();
+			maxDrink = playerObject->getMaxDrink();
+			hasValues = true;
 		}
 
-		int food = playerObject->getFood();
-		int maxFood = playerObject->getMaxFood();
-		int drink = playerObject->getDrink();
-		int maxDrink = playerObject->getMaxDrink();
+		if (!hasValues) {
+			resultUnicode += L"\\#ff4444Food/Drink not available.\\#ffffff\n";
+			resultUnicode += L"Use /emu memscan to discover offsets, then /emu monitor setoffsets to configure.\n";
+			resultUnicode += L"Or set compiled addresses in PlayerObject.h.";
+			return true;
+		}
 
 		if (command == L"food") {
 			char message[128];
@@ -426,5 +640,7 @@ void EmuCommandParser::showHelp(soe::unicode& resultUnicode) {
 	resultUnicode += L"/emu stomach - Shows current Food and Drink fill values with percentages.\n";
 	resultUnicode += L"/emu food - Shows current Food fill value with percentage.\n";
 	resultUnicode += L"/emu drink - Shows current Drink fill value with percentage.\n";
+	resultUnicode += L"/emu memscan - Memory scanning tools to discover PlayerObject field offsets.\n";
+	resultUnicode += L"/emu monitor - Food/Drink monitor configuration (runtime offset setup).\n";
 	resultUnicode += L"/emu help - This command, which lists help info on available extension commands.\n";
 }

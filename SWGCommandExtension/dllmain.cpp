@@ -12,6 +12,7 @@
 #include "SwgCuiLoginScreen.h"
 #include "SwgCuiCommandParserDefault.h"
 #include "SwgCuiMediatorFactorySetup.h"
+#include "FoodDrinkMonitor.h"
 
 using namespace std;
 
@@ -81,6 +82,7 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 						
 			// Show our loaded message (only displays if chat is already present).
 			Game::debugPrintUi("Use /console for details on extension command usage.");
+			FoodDrinkMonitor::initialize();
 		} else {
 			Game::debugPrintUi("[LOAD] FAILED for CommandExtensions");
 		}
@@ -88,6 +90,7 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 		break;
 	}
 	case DLL_PROCESS_DETACH:
+		FoodDrinkMonitor::shutdown();
 		DetourTransactionBegin();
 		DetourUpdateThread(GetCurrentThread());
 

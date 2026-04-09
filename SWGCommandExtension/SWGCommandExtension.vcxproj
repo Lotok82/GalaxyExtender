@@ -28,26 +28,26 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>false</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -103,9 +103,6 @@
       <AdditionalLibraryDirectories>C:\Users\TheAnswer\Documents\Visual Studio 2015\Projects\Express\lib.X86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>detours.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command> xcopy /d /y "$(OutDir)$(TargetName).dll" "C:\emutest2"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -141,9 +138,6 @@
       <AdditionalLibraryDirectories>C:\Users\TheAnswer\Documents\Visual Studio 2015\Projects\Express\lib.X86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>detours.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command> xcopy /d /y "$(OutDir)$(TargetName).dll" "C:\emutest2"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -185,6 +179,7 @@
     <ClInclude Include="CuiMediatorFactory.h" />
     <ClInclude Include="CuiWidget3dObjectListViewer.h" />
     <ClInclude Include="EmuCommandParser.h" />
+    <ClInclude Include="FoodDrinkMonitor.h" />
     <ClInclude Include="FreeChaseCamera.h" />
     <ClInclude Include="Game.h" />
     <ClInclude Include="GameLanguageManager.h" />
@@ -241,6 +236,7 @@
       </PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="EmuCommandParser.cpp" />
+    <ClCompile Include="FoodDrinkMonitor.cpp" />
     <ClCompile Include="Game.cpp" />
     <ClCompile Include="GroundScene.cpp" />
     <ClCompile Include="Object.cpp" />

@@ -36,10 +36,10 @@
 // Set these if you find the offsets via debugger inspection.
 // Usage: getMemoryReference<AutoDeltaVariable<int>>(offset).getCurrent()
 // These are consecutive: m_food, m_maxFood, m_drink, m_maxDrink, m_meds, m_maxMeds
-#define PLAYEROBJECT_FOOD_FIELD_OFFSET     0x0  // TODO: find via debugger
-#define PLAYEROBJECT_MAXFOOD_FIELD_OFFSET  0x0  // TODO: find via debugger
-#define PLAYEROBJECT_DRINK_FIELD_OFFSET    0x0  // TODO: find via debugger
-#define PLAYEROBJECT_MAXDRINK_FIELD_OFFSET 0x0  // TODO: find via debugger
+#define PLAYEROBJECT_FOOD_FIELD_OFFSET     0x0570  // AutoDeltaVariable<int>, current value at 0x057C
+#define PLAYEROBJECT_MAXFOOD_FIELD_OFFSET  0x0  // TODO: find via memscan
+#define PLAYEROBJECT_DRINK_FIELD_OFFSET    0x0598  // AutoDeltaVariable<int>, current value at 0x05A4
+#define PLAYEROBJECT_MAXDRINK_FIELD_OFFSET 0x0  // TODO: find via memscan
 
 class PlayerObject : public IntangibleObject {
 public:
@@ -63,9 +63,17 @@ public:
 #elif PLAYEROBJECT_FOOD_FIELD_OFFSET != 0
 	// Approach B: Read the AutoDeltaVariable fields directly from memory
 	int getFood() const     { return getMemoryReference<AutoDeltaVariable<int>>(PLAYEROBJECT_FOOD_FIELD_OFFSET).getCurrent(); }
-	int getMaxFood() const  { return getMemoryReference<AutoDeltaVariable<int>>(PLAYEROBJECT_MAXFOOD_FIELD_OFFSET).getCurrent(); }
 	int getDrink() const    { return getMemoryReference<AutoDeltaVariable<int>>(PLAYEROBJECT_DRINK_FIELD_OFFSET).getCurrent(); }
+#if PLAYEROBJECT_MAXFOOD_FIELD_OFFSET != 0
+	int getMaxFood() const  { return getMemoryReference<AutoDeltaVariable<int>>(PLAYEROBJECT_MAXFOOD_FIELD_OFFSET).getCurrent(); }
+#else
+	int getMaxFood() const  { return 100; }  // default max until offset discovered
+#endif
+#if PLAYEROBJECT_MAXDRINK_FIELD_OFFSET != 0
 	int getMaxDrink() const { return getMemoryReference<AutoDeltaVariable<int>>(PLAYEROBJECT_MAXDRINK_FIELD_OFFSET).getCurrent(); }
+#else
+	int getMaxDrink() const { return 100; }  // default max until offset discovered
+#endif
 #else
 	// Stub methods - return -1 to indicate addresses not yet configured
 	int getFood() const     { return -1; }
