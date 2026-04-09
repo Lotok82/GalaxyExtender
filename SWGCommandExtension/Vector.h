@@ -1,7 +1,7 @@
 #pragma once
 
 #include "soewrappers.h"
-
+#include <cmath>
 class Vector {
 protected:
 	float values[3];

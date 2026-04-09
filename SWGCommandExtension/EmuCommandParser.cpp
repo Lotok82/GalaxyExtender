@@ -15,6 +15,8 @@
 #include "CollisionWorld.h"
 #include "ObjectAttributeManager.h"
 
+#define MEDICAL_ENHANCE_POISON 0x391AC375
+
 uint32_t EmuCommandParser::newVtable[3]; /* = { 0x161E6CC, 0x15EA3C4, 0x15EA3C8 }; for reference*/
 
 void EmuCommandParser::initializeVtable() {
@@ -336,6 +338,61 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 		}
 
 		return true;
+	} else if (command == L"stomach" || command == L"food" || command == L"drink") {
+		PlayerObject* playerObject = Game::getPlayerObject();
+
+		if (!playerObject) {
+			resultUnicode += L"PlayerObject is null - not logged in?";
+			return true;
+		}
+
+		if (!playerObject->hasFoodDrinkAddresses()) {
+			resultUnicode += L"Food/Drink addresses not yet configured in PlayerObject.h. ";
+			resultUnicode += L"See the TODO comments for how to find them via reverse engineering.";
+			return true;
+		}
+
+		int food = playerObject->getFood();
+		int maxFood = playerObject->getMaxFood();
+		int drink = playerObject->getDrink();
+		int maxDrink = playerObject->getMaxDrink();
+
+		if (command == L"food") {
+			char message[128];
+			if (maxFood > 0) {
+				int pct = (food * 100) / maxFood;
+				sprintf_s(message, sizeof(message), "Food: %d / %d (%d%%)", food, maxFood, pct);
+			} else {
+				sprintf_s(message, sizeof(message), "Food: %d / %d", food, maxFood);
+			}
+			resultUnicode += message;
+		} else if (command == L"drink") {
+			char message[128];
+			if (maxDrink > 0) {
+				int pct = (drink * 100) / maxDrink;
+				sprintf_s(message, sizeof(message), "Drink: %d / %d (%d%%)", drink, maxDrink, pct);
+			} else {
+				sprintf_s(message, sizeof(message), "Drink: %d / %d", drink, maxDrink);
+			}
+			resultUnicode += message;
+		} else {
+			// "stomach" - show both
+			char message[256];
+			if (maxFood > 0 && maxDrink > 0) {
+				int foodPct = (food * 100) / maxFood;
+				int drinkPct = (drink * 100) / maxDrink;
+				sprintf_s(message, sizeof(message),
+					"Food: %d / %d (%d%%)  |  Drink: %d / %d (%d%%)",
+					food, maxFood, foodPct, drink, maxDrink, drinkPct);
+			} else {
+				sprintf_s(message, sizeof(message),
+					"Food: %d / %d  |  Drink: %d / %d",
+					food, maxFood, drink, maxDrink);
+			}
+			resultUnicode += message;
+		}
+
+		return true;
 	} else if (command == L"help") {
 		showHelp(resultUnicode);
 
@@ -366,5 +423,8 @@ void EmuCommandParser::showHelp(soe::unicode& resultUnicode) {
 	resultUnicode += L"/emu getradialflora - Prints the current Radial Flora Distance value to the chat.\n";
 	resultUnicode += L"</emu getncflora|/emu getnoncollidableflora> - Prints the current Non-Collidable Flora Distance value to the chat.\n";
 	resultUnicode += L"</emu setall|/emu overrideall> <default|low|medium|high|ultra> - Sets all graphics settings to preset values. Type /overrideall help for info on each preset.\n";
+	resultUnicode += L"/emu stomach - Shows current Food and Drink fill values with percentages.\n";
+	resultUnicode += L"/emu food - Shows current Food fill value with percentage.\n";
+	resultUnicode += L"/emu drink - Shows current Drink fill value with percentage.\n";
 	resultUnicode += L"/emu help - This command, which lists help info on available extension commands.\n";
 }

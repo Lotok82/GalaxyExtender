@@ -80,10 +80,9 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 			// Mid-function hooks for global detail and high detail terrain distance.
 						
 			// Show our loaded message (only displays if chat is already present).
-			Game::debugPrintUi("[LOADED] Settings Override Extensions by N00854180T");
-			Game::debugPrintUi("Use /exthelp for details on extension command usage.");
+			Game::debugPrintUi("Use /console for details on extension command usage.");
 		} else {
-			Game::debugPrintUi("[LOAD] FAILED");
+			Game::debugPrintUi("[LOAD] FAILED for CommandExtensions");
 		}
 
 		break;
