@@ -365,6 +365,10 @@ void FoodDrinkMonitor::updateNetStatusUI() {
 	int drink = player->getDrink();
 	int maxDrink = player->getMaxDrink();
 
+	// Clamp to 0 — server can send -1 during decay ticks
+	if (food < 0) food = 0;
+	if (drink < 0) drink = 0;
+
 	// Only update the widget text when values change
 	char buf[32];
 
