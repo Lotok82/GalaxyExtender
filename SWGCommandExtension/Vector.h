@@ -7,14 +7,6 @@ protected:
 	float values[3];
 
 public:
-	/*static const Vector ZERO;
-
-	//Axis Representations
-	static const Vector UNIT_X;
-	static const Vector UNIT_Y;
-	static const Vector UNIT_Z;*/
-
-public:
 	inline Vector() {
 		memset(values, 0, sizeof(values));
 	}

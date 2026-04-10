@@ -9,19 +9,6 @@
 #include "CuiMediatorFactory.h"
 
 // --- Static member initialization ---
-int FoodDrinkMonitor::s_food = 0;
-int FoodDrinkMonitor::s_maxFood = 0;
-int FoodDrinkMonitor::s_drink = 0;
-int FoodDrinkMonitor::s_maxDrink = 0;
-
-int FoodDrinkMonitor::s_foodOffset = 0;
-int FoodDrinkMonitor::s_maxFoodOffset = 0;
-int FoodDrinkMonitor::s_drinkOffset = 0;
-int FoodDrinkMonitor::s_maxDrinkOffset = 0;
-
-bool FoodDrinkMonitor::s_enabled = false;
-bool FoodDrinkMonitor::s_offsetsConfigured = false;
-
 uint8_t* FoodDrinkMonitor::s_snapshot = nullptr;
 size_t FoodDrinkMonitor::s_snapshotSize = 0;
 
@@ -76,12 +63,6 @@ bool seh_memcpy(void* dest, const void* src, size_t size) {
 // ============================================================================
 
 void FoodDrinkMonitor::initialize() {
-	s_food = 0;
-	s_maxFood = 0;
-	s_drink = 0;
-	s_maxDrink = 0;
-	s_enabled = false;
-	s_offsetsConfigured = false;
 	s_snapshot = nullptr;
 	s_snapshotSize = 0;
 	s_foodText = nullptr;
@@ -102,84 +83,6 @@ void FoodDrinkMonitor::shutdown() {
 	s_drinkText = nullptr;
 	s_uiLookupDone = false;
 }
-
-// ============================================================================
-// Configuration
-// ============================================================================
-
-void FoodDrinkMonitor::setOffsets(int food, int maxFood, int drink, int maxDrink) {
-	s_foodOffset = food;
-	s_maxFoodOffset = maxFood;
-	s_drinkOffset = drink;
-	s_maxDrinkOffset = maxDrink;
-	s_offsetsConfigured = (food != 0 && maxFood != 0 && drink != 0 && maxDrink != 0);
-}
-
-bool FoodDrinkMonitor::isConfigured() {
-	return s_offsetsConfigured;
-}
-
-void FoodDrinkMonitor::enable() {
-	s_enabled = true;
-}
-
-void FoodDrinkMonitor::disable() {
-	s_enabled = false;
-}
-
-bool FoodDrinkMonitor::isEnabled() {
-	return s_enabled;
-}
-
-// ============================================================================
-// Safe memory read helper (public API delegates to namespace helper)
-// ============================================================================
-
-bool FoodDrinkMonitor::safeReadInt(PlayerObject* obj, int offset, int& outValue) {
-	return seh_readInt(obj, offset, outValue);
-}
-
-// ============================================================================
-// Polling — called from GroundScene::parseMessages each frame
-// ============================================================================
-
-bool FoodDrinkMonitor::poll() {
-	if (!s_enabled || !s_offsetsConfigured)
-		return false;
-
-	PlayerObject* playerObject = Game::getPlayerObject();
-	if (!playerObject)
-		return false;
-
-	int oldFood = s_food;
-	int oldMaxFood = s_maxFood;
-	int oldDrink = s_drink;
-	int oldMaxDrink = s_maxDrink;
-
-	// Read AutoDeltaVariable<int> current value at each offset.
-	// AutoDeltaVariable stores its current value at internal offset +0xC.
-	int value;
-	if (seh_readInt(playerObject, s_foodOffset + 0xC, value))
-		s_food = value;
-	if (seh_readInt(playerObject, s_maxFoodOffset + 0xC, value))
-		s_maxFood = value;
-	if (seh_readInt(playerObject, s_drinkOffset + 0xC, value))
-		s_drink = value;
-	if (seh_readInt(playerObject, s_maxDrinkOffset + 0xC, value))
-		s_maxDrink = value;
-
-	return (s_food != oldFood || s_maxFood != oldMaxFood ||
-		s_drink != oldDrink || s_maxDrink != oldMaxDrink);
-}
-
-// ============================================================================
-// Getters
-// ============================================================================
-
-int FoodDrinkMonitor::getFood() { return s_food; }
-int FoodDrinkMonitor::getMaxFood() { return s_maxFood; }
-int FoodDrinkMonitor::getDrink() { return s_drink; }
-int FoodDrinkMonitor::getMaxDrink() { return s_maxDrink; }
 
 // ============================================================================
 // Memory Scanner — Snapshot
@@ -405,14 +308,6 @@ void FoodDrinkMonitor::dumpMemory(int offset, int byteCount, soe::unicode& resul
 // ============================================================================
 // Net Status UI Update
 // ============================================================================
-
-bool FoodDrinkMonitor::isUIFound() {
-	return s_foodText != nullptr || s_drinkText != nullptr;
-}
-
-int FoodDrinkMonitor::getUILookupAttempts() {
-	return s_uiLookupAttempts;
-}
 
 void FoodDrinkMonitor::updateNetStatusUI() {
 #if UITEXT_SETLOCALTEXT_ADDRESS == 0
