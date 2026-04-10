@@ -59,4 +59,7 @@ private:
 	static int s_lastDisplayedFood;
 	static int s_lastDisplayedDrink;
 	static int s_uiLookupAttempts;
+
+	// Track PlayerObject pointer to detect character switches
+	static void* s_lastPlayerObject;
 };
