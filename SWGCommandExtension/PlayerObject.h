@@ -4,42 +4,29 @@
 #include "AutoDeltaVariable.h"
 
 // ============================================================================
-// PlayerObject food/drink/meds accessor addresses
-// 
-// These addresses must be found by reverse-engineering the compiled SWG client
-// binary (e.g. using Ghidra or IDA Pro). In PlayerObject.cpp source, the
-// functions are at lines 1686-1720. They are trivial accessors that return
-// m_food.get(), m_maxFood.get(), etc.
+// PlayerObject food/drink field offsets
 //
-// OPTION A: If you find the function addresses, use the runMethod approach.
-//           Search near speaksLanguage (0x65FEA0) in the same compilation unit.
+// Discovered via runtime memscan (snapshot -> eat/drink -> diff).
+// The client's getter functions (getFood, etc.) are inlined, so there are no
+// callable addresses. We read the AutoDeltaVariable<int> fields directly from
+// the PlayerObject memory layout instead.
 //
-// OPTION B: If you find the member variable offsets within the PlayerObject
-//           instance (via debugger memory inspection), use getMemoryReference 
-//           with AutoDeltaVariable. The AutoDeltaVariable stores its current
-//           value at internal offset 0xC (see AutoDeltaVariable.h).
-//           To find offsets: in a debugger, set a breakpoint on speaksLanguage
-//           (0x65FEA0), inspect ECX (the this pointer), then search the memory
-//           region for known food/drink values after eating/drinking in-game.
-//
-// OPTION C: Runtime pattern scan (most robust across builds). Scan the .text
-//           section for the byte signature of the getFood function.
+// See Documentation/food-drink-research.md for full discovery methodology.
 // ============================================================================
 
-// --- Set these to 0 until you have the real addresses ---
-#define PLAYEROBJECT_GETFOOD_ADDRESS     0x0  // TODO: find via reverse engineering
-#define PLAYEROBJECT_GETMAXFOOD_ADDRESS  0x0  // TODO: find via reverse engineering
-#define PLAYEROBJECT_GETDRINK_ADDRESS    0x0  // TODO: find via reverse engineering
-#define PLAYEROBJECT_GETMAXDRINK_ADDRESS 0x0  // TODO: find via reverse engineering
+// Getter function addresses — unused (inlined by compiler), kept for reference
+#define PLAYEROBJECT_GETFOOD_ADDRESS     0x0
+#define PLAYEROBJECT_GETMAXFOOD_ADDRESS  0x0
+#define PLAYEROBJECT_GETDRINK_ADDRESS    0x0
+#define PLAYEROBJECT_GETMAXDRINK_ADDRESS 0x0
 
-// --- Alternative: memory offsets of AutoDeltaVariable<int> fields in PlayerObject ---
-// Set these if you find the offsets via debugger inspection.
-// Usage: getMemoryReference<AutoDeltaVariable<int>>(offset).getCurrent()
-// These are consecutive: m_food, m_maxFood, m_drink, m_maxDrink, m_meds, m_maxMeds
-#define PLAYEROBJECT_FOOD_FIELD_OFFSET     0x0570  // AutoDeltaVariable<int>, current value at 0x057C
-#define PLAYEROBJECT_MAXFOOD_FIELD_OFFSET  0x0  // TODO: find via memscan
-#define PLAYEROBJECT_DRINK_FIELD_OFFSET    0x0598  // AutoDeltaVariable<int>, current value at 0x05A4
-#define PLAYEROBJECT_MAXDRINK_FIELD_OFFSET 0x0  // TODO: find via memscan
+// AutoDeltaVariable<int> field offsets from PlayerObject base.
+// Value is at offset + 0xC (see AutoDeltaVariable.h).
+// Fields are declared consecutively: m_food, m_maxFood, m_drink, m_maxDrink, m_meds, m_maxMeds
+#define PLAYEROBJECT_FOOD_FIELD_OFFSET     0x0570  // Confirmed — current value at 0x057C
+#define PLAYEROBJECT_MAXFOOD_FIELD_OFFSET  0x0     // TODO: predicted 0x0584, verify via memscan
+#define PLAYEROBJECT_DRINK_FIELD_OFFSET    0x0598  // Confirmed — current value at 0x05A4
+#define PLAYEROBJECT_MAXDRINK_FIELD_OFFSET 0x0     // TODO: predicted 0x05AC, verify via memscan
 
 class PlayerObject : public IntangibleObject {
 public:
@@ -51,31 +38,26 @@ public:
 		return runMethod<0x65FEA0, bool>(langid);
 	}
 
-	// ---- Food/Drink accessors ----
-	// Two approaches provided. Use whichever one you can find addresses for.
-
-	// Approach A: Call the client's getter functions directly (preferred if addresses known)
 #if PLAYEROBJECT_GETFOOD_ADDRESS != 0
 	int getFood() const     { return runMethod<PLAYEROBJECT_GETFOOD_ADDRESS, int>(); }
 	int getMaxFood() const  { return runMethod<PLAYEROBJECT_GETMAXFOOD_ADDRESS, int>(); }
 	int getDrink() const    { return runMethod<PLAYEROBJECT_GETDRINK_ADDRESS, int>(); }
 	int getMaxDrink() const { return runMethod<PLAYEROBJECT_GETMAXDRINK_ADDRESS, int>(); }
 #elif PLAYEROBJECT_FOOD_FIELD_OFFSET != 0
-	// Approach B: Read the AutoDeltaVariable fields directly from memory
 	int getFood() const     { return getMemoryReference<AutoDeltaVariable<int>>(PLAYEROBJECT_FOOD_FIELD_OFFSET).getCurrent(); }
 	int getDrink() const    { return getMemoryReference<AutoDeltaVariable<int>>(PLAYEROBJECT_DRINK_FIELD_OFFSET).getCurrent(); }
 #if PLAYEROBJECT_MAXFOOD_FIELD_OFFSET != 0
 	int getMaxFood() const  { return getMemoryReference<AutoDeltaVariable<int>>(PLAYEROBJECT_MAXFOOD_FIELD_OFFSET).getCurrent(); }
 #else
-	int getMaxFood() const  { return 100; }  // default max until offset discovered
+	int getMaxFood() const  { return 100; }  // TODO: replace when maxFood offset confirmed
 #endif
 #if PLAYEROBJECT_MAXDRINK_FIELD_OFFSET != 0
 	int getMaxDrink() const { return getMemoryReference<AutoDeltaVariable<int>>(PLAYEROBJECT_MAXDRINK_FIELD_OFFSET).getCurrent(); }
 #else
-	int getMaxDrink() const { return 100; }  // default max until offset discovered
+	int getMaxDrink() const { return 100; }  // TODO: replace when maxDrink offset confirmed
 #endif
 #else
-	// Stub methods - return -1 to indicate addresses not yet configured
+	// No addresses configured — return -1 as sentinel
 	int getFood() const     { return -1; }
 	int getMaxFood() const  { return -1; }
 	int getDrink() const    { return -1; }

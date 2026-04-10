@@ -8,9 +8,6 @@
 #include "FoodDrinkMonitor.h"
 
 void GroundScene::parseMessages(InputMap* map) {
-	// Poll food/drink monitor (lightweight — early-outs if disabled)
-	FoodDrinkMonitor::poll();
-
 	// Update food/drink values on the net status UI panel
 	FoodDrinkMonitor::updateNetStatusUI();
 

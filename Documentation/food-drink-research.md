@@ -274,9 +274,9 @@ The client-side `AutoDeltaVariable<int>` is updated by the baseline/delta unpack
 | File | Role |
 |------|------|
 | `PlayerObject.h` | `getFood()`, `getDrink()` etc. using confirmed field offsets (0x0570, 0x0598) |
-| `FoodDrinkMonitor.h/.cpp` | Runtime memory scanner, polling monitor, net status UI updater |
-| `EmuCommandParser.cpp` | Chat commands (`/emu food`, `/emu drink`, `/emu memscan`, `/emu monitor`) |
-| `GroundScene.cpp` | Calls `FoodDrinkMonitor::poll()` and `updateNetStatusUI()` each frame |
+| `FoodDrinkMonitor.h/.cpp` | Memory scanner tools, net status UI updater |
+| `EmuCommandParser.cpp` | Chat commands (`/emu food`, `/emu drink`, `/emu memscan`) |
+| `GroundScene.cpp` | Calls `FoodDrinkMonitor::updateNetStatusUI()` each frame |
 | `dllmain.cpp` | Calls `FoodDrinkMonitor::initialize()` / `shutdown()` |
 | `UIText.h` | `SetLocalText()` at `0x0110F580`, `AppendLocalText()` at `0x0110FB40` |
 | `SWGRootFiles\ui\ui_pda_net_status.inc` | Modified UI layout with food/drink rows |

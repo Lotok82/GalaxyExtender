@@ -61,26 +61,21 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 		DetourTransactionBegin();
 		DetourUpdateThread(GetCurrentThread());
 
-		// Direct function hooks.
 		ATTACH_HOOK(SwgCuiLoginScreen::onButtonPressed);
 		ATTACH_HOOK(CuiChatParser::parse);
 		ATTACH_HOOK(TerrainObject::setHighLevelOfDetailThresholdHook);
 		ATTACH_HOOK(TerrainObject::setLevelOfDetailThresholdHook);
 		ATTACH_HOOK(GroundScene::parseMessages);
-		//ATTACH_HOOK(SwgCuiCommandParserDefault::ctorHook);
-		//ATTACH_HOOK(SwgCuiCommandParserDefault::removeAliasStatic);
 		ATTACH_HOOK(SwgCuiMediatorFactorySetup::install);
 
 		LONG errorCode = DetourTransactionCommit();
 
 		if (errorCode == NO_ERROR) {
-			//Detour successful
-
+			// NOP out 7-byte terrain detail clamp at 0xC8D258, removing the
+			// engine's hard cap on terrain LOD so /emu globaldetail can exceed it.
 			const BYTE newData[7] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
 			writeBytes((BYTE*)0xC8D258, newData, 7);
-			// Mid-function hooks for global detail and high detail terrain distance.
-						
-			// Show our loaded message (only displays if chat is already present).
+
 			Game::debugPrintUi("Use /console for details on extension command usage.");
 			FoodDrinkMonitor::initialize();
 		} else {

@@ -148,36 +148,6 @@ Dumps raw memory as a hex dump starting at the specified offset. Default is 64 b
 
 ---
 
-## Food/Drink Monitor (Advanced)
-
-Runtime configuration for the food/drink monitor. These are mainly useful if the compiled-in offsets ever need to change without rebuilding the DLL.
-
-### `/emu monitor`
-
-Shows the current monitor status (enabled/disabled, offsets configured, cached values) and lists available subcommands.
-
-### `/emu monitor on`
-
-Enables per-frame polling of food/drink values from `PlayerObject` memory. Requires offsets to be configured first.
-
-### `/emu monitor off`
-
-Disables per-frame polling.
-
-### `/emu monitor status`
-
-Shows detailed diagnostic info: whether the monitor is enabled, whether offsets are configured, the cached food/drink values, direct-read values from `PlayerObject`, and whether the UI widgets on the network monitor panel have been found.
-
-### `/emu monitor setoffsets <food> <maxFood> <drink> <maxDrink>`
-
-Sets the `AutoDeltaVariable` base offsets for food/drink fields in `PlayerObject`. Values are hex offsets.
-
-- **Example**: `/emu monitor setoffsets 0x570 0x584 0x598 0x5AC`
-
-This is only needed if you're testing new offsets at runtime. The confirmed offsets (food=0x570, drink=0x598) are compiled into the DLL.
-
----
-
 ## Debug Commands
 
 ### `/emu findui`

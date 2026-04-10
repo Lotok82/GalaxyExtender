@@ -59,7 +59,7 @@ SWGCommandExtension/
 ├── CuiChatParser.h / .cpp       # Hooks the client's command parser — intercepts slash commands
 ├── CommandParser.h / .cpp        # Base SOE command parser (ctor, performParsing vtable)
 ├── EmuCommandParser.h / .cpp     # All /emu subcommands (graphics overrides, diagnostics, food/drink)
-├── FoodDrinkMonitor.h / .cpp     # Runtime memory scanner + food/drink polling + net status UI update
+├── FoodDrinkMonitor.h / .cpp     # Memory scanner tools + net status UI updater
 │
 │   ── Mediator / UI System ──
 ├── CuiMediator.h                # UI mediator wrapper (get/create, fetch/release, isActive)
@@ -334,11 +334,8 @@ This pattern applies to **all workspace mediators** with `duplicateOnly=true` (e
 | `/emu memscan search <value>` | Find all offsets containing an int32 value |
 | `/emu memscan delta <offset>` | Read AutoDeltaVariable at offset |
 | `/emu memscan dump <offset> <length>` | Hex dump of raw memory |
-| `/emu monitor on/off` | Enable/disable per-frame polling |
-| `/emu monitor status` | Show current monitor config and cached values |
-| `/emu monitor setoffsets <f> <mf> <d> <md>` | Set ADV base offsets at runtime |
 
 ### Future Work
 - Confirm maxFood/maxDrink offsets (`/emu memscan dump 0x570 0x50`)
 - Character sheet visual bar fill (hook SwgCuiCharacterSheet, widget offsets: foodBar=+0xAC, drinkBar=+0xB4)
-- PLAY9 delta hook for push-based updates instead of polling
+- PLAY9 delta hook for push-based updates
