@@ -18,6 +18,7 @@ bool FoodDrinkMonitor::s_uiLookupDone = false;
 int FoodDrinkMonitor::s_lastDisplayedFood = -1;
 int FoodDrinkMonitor::s_lastDisplayedDrink = -1;
 int FoodDrinkMonitor::s_uiLookupAttempts = 0;
+void* FoodDrinkMonitor::s_lastPlayerObject = nullptr;
 
 // ============================================================================
 // SEH helper functions — POD-only, safe to use __try/__except
@@ -71,6 +72,7 @@ void FoodDrinkMonitor::initialize() {
 	s_lastDisplayedFood = -1;
 	s_lastDisplayedDrink = -1;
 	s_uiLookupAttempts = 0;
+	s_lastPlayerObject = nullptr;
 }
 
 void FoodDrinkMonitor::shutdown() {
@@ -313,6 +315,21 @@ void FoodDrinkMonitor::updateNetStatusUI() {
 #if UITEXT_SETLOCALTEXT_ADDRESS == 0
 	return; // SetLocalText not available yet
 #else
+	// Detect character switch — PlayerObject pointer changes when relogging
+	PlayerObject* player = Game::getPlayerObject();
+	if (player != s_lastPlayerObject) {
+		s_lastPlayerObject = player;
+		s_foodText = nullptr;
+		s_drinkText = nullptr;
+		s_uiLookupDone = false;
+		s_lastDisplayedFood = -1;
+		s_lastDisplayedDrink = -1;
+		s_uiLookupAttempts = 0;
+	}
+
+	if (!player)
+		return;
+
 	// Lazy lookup — find the food/drink text widgets, retry until found
 	if (!s_uiLookupDone) {
 		// Throttle: only attempt every 60 frames (~1 second) to avoid overhead
@@ -353,11 +370,6 @@ void FoodDrinkMonitor::updateNetStatusUI() {
 	}
 
 	if (!s_foodText && !s_drinkText)
-		return;
-
-	// Read current values directly from PlayerObject
-	PlayerObject* player = Game::getPlayerObject();
-	if (!player)
 		return;
 
 	int food = player->getFood();

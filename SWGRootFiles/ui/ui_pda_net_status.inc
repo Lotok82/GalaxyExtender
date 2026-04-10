@@ -2,14 +2,14 @@
 			BackgroundOpacity='1.00'
 			BackgroundTint='#00D6FB'
 			Location='897,588'
-			MaximumSize='16384,94'
-			MinimumSize='140,94'
+			MaximumSize='16384,106'
+			MinimumSize='140,106'
 			Name='netStatus'
 			PackLocation='fff,fff'
 			PalBgTint='back1'
 			RStyleDefault='/Styles.New.tool.tool_TL_in.rs_default'
-			ScrollExtent='140,94'
-			Size='140,94'
+			ScrollExtent='140,106'
+			Size='140,106'
 			UserMovable='true'
 			UserResizable='true'
 			VisualEditLock='true'
@@ -25,8 +25,8 @@
 				Location='1,2'
 				Name='comp'
 				PackSize='a,a'
-				ScrollExtent='136,90'
-				Size='136,89'
+				ScrollExtent='136,102'
+				Size='136,101'
 				SpacingType='Constant'
 			>
 				<Page
@@ -168,8 +168,23 @@
 						TextColor='#96F4FC'
 					>500</Text>
 				</Page>
+				<Text
+					Font='bold_12'
+					LocalText='- - - - - - - - - -'
+					Location='0,62'
+					MaxLines='1'
+					Name='separator'
+					PackSize='a,a'
+					PalText='text1'
+					ScrollExtent='136,6'
+					Size='136,6'
+					TextAlignment='Center'
+					TextAlignmentVertical='Top'
+					TextColor='#96F4FC'
+					Opacity='0.40'
+				>- - - - - - - - - -</Text>
 				<Page
-					Location='0,60'
+					Location='0,72'
 					Name='food'
 					PackSize='a,a'
 					ScrollExtent='136,15'
@@ -204,7 +219,7 @@
 					>0/100</Text>
 				</Page>
 				<Page
-					Location='0,75'
+					Location='0,87'
 					Name='drink'
 					PackSize='a,a'
 					ScrollExtent='136,15'
