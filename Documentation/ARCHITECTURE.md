@@ -58,8 +58,9 @@ SWGCommandExtension/
 │   ── Command System ──
 ├── CuiChatParser.h / .cpp       # Hooks the client's command parser — intercepts slash commands
 ├── CommandParser.h / .cpp        # Base SOE command parser (ctor, performParsing vtable)
-├── EmuCommandParser.h / .cpp     # All /emu subcommands (graphics overrides, diagnostics, food/drink)
+├── EmuCommandParser.h / .cpp     # All /emu subcommands (graphics overrides, diagnostics, food/drink, hover height)
 ├── FoodDrinkMonitor.h / .cpp     # Memory scanner tools + net status UI updater
+├── CustomizationData.h           # VehicleHoverDynamics wrapper (direct memory access to hover parameters)
 │
 │   ── Mediator / UI System ──
 ├── CuiMediator.h                # UI mediator wrapper (get/create, fetch/release, isActive)
@@ -189,6 +190,15 @@ The project reimplements SOE's custom STL-like types because the client uses its
 | `0x01918970` | `soe::unicode::empty_string` static |
 | `0x012EA770` | SOE string allocator (sizes ≤ 0x80) |
 | `0x00AC15C0` | SOE general allocator (sizes > 0x80) |
+| | |
+| **Vehicle/Hover System** | |
+| `0x011ab740` | `VehicleHoverDynamics` constructor |
+| `0x011ac580` | `VehicleHoverDynamics::readParamsFromCustomizationData()` |
+| `0x00b39870` | `CustomizationDataProperty::getClassPropertyId()` (static) |
+| `0x00b23ee0` | `Object::getProperty(const PropertyId&)` |
+| `0x00b399a0` | `CustomizationDataProperty::fetchCustomizationData()` |
+| `0x00b32850` | `CustomizationData::findConstVariable(const std::string&)` |
+| `0x00b33510` | `CustomizationData::registerModificationListener()` |
 
 ---
 
@@ -339,3 +349,38 @@ This pattern applies to **all workspace mediators** with `duplicateOnly=true` (e
 - Confirm maxFood/maxDrink offsets (`/emu memscan dump 0x570 0x50`)
 - Character sheet visual bar fill (hook SwgCuiCharacterSheet, widget offsets: foodBar=+0xAC, drinkBar=+0xB4)
 - PLAY9 delta hook for push-based updates
+
+---
+
+## Vehicle Hover Height Feature
+
+Allows adjusting the hover height of jetpacks and other hover vehicles at runtime via direct memory write to `VehicleHoverDynamics::m_hoverHeight` (offset `+0x68`).
+
+### Object Layout Additions
+
+| Object Offset | Type | Member |
+|---------------|------|--------|
+| `+0x30` | `Dynamics*` | `m_dynamics` — confirmed via runtime debug on mounted vehicles |
+
+### Traversal: Player → Dynamics
+
+```
+Player.getAttachedTo() → Container.getAttachedTo() → Vehicle.getDynamics() → VehicleHoverDynamics
+```
+
+Two levels up from the player, not one — an intermediate container/slot object sits between the rider and the vehicle creature.
+
+### Key Insight: std::string ABI Mismatch
+
+The SWG client was built with an older MSVC runtime. Passing a modern MSVC 2022 `std::string` to client functions like `CustomizationData::findConstVariable()` causes ACCESS_VIOLATION due to incompatible memory layout. The workaround is direct memory access to known offsets instead of calling client string-parameter functions.
+
+See [vehicle-hover-research.md](vehicle-hover-research.md) for full technical details, all confirmed offsets, and CustomizationData variable paths.
+
+### Chat Commands
+
+| Command | Description |
+|---------|-------------|
+| `/emu hover` | Show current hover height |
+| `/emu hover <value>` | Set hover height (float, game units) |
+| `/emu hover reset` | Restore original height |
+| `/emu hover debug` | Dump mount object hierarchy for debugging |

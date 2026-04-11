@@ -113,6 +113,36 @@ Targets your current target's target. Look at a player or NPC, and this command 
 
 ---
 
+## Vehicle Hover Height
+
+Adjusts the hover height of jetpacks, speeders, swoops, and other hover vehicles. You must be mounted on a vehicle to use these commands.
+
+**Note**: Height changes are client-side only — other players will see your vehicle at its normal height.
+
+### `/emu hover`
+
+Shows the current hover height of your vehicle.
+
+- **Example output**: `Current hover height: 0.50`
+
+### `/emu hover <value>`
+
+Sets the hover height to the specified value in game units (float).
+
+- **Default**: ~0.5 for most vehicles
+- **Example**: `/emu hover 5.0` — hover 5 units above ground
+- **Example**: `/emu hover 0.2` — fly very low
+
+### `/emu hover reset`
+
+Restores the hover height to whatever it was before you changed it. Only works if you've previously set a custom height during this session.
+
+### `/emu hover debug`
+
+Developer tool — prints the mount object hierarchy, memory addresses, and dynamics pointers for debugging. Useful if the command isn't finding the vehicle dynamics on a particular mount type.
+
+---
+
 ## Memory Scanner (Advanced)
 
 These are developer tools for discovering unknown memory offsets in the client. You probably don't need these unless you're contributing to the project.

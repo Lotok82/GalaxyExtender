@@ -15,6 +15,10 @@
 #include "CollisionWorld.h"
 #include "ObjectAttributeManager.h"
 #include "FoodDrinkMonitor.h"
+#include "CustomizationData.h"
+
+static float s_originalHoverHeight = 0.0f;
+static bool s_hoverHeightStored = false;
 
 uint32_t EmuCommandParser::newVtable[3];
 
@@ -509,6 +513,127 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 		}
 
 		return true;
+	} else if (command == L"hoverheight" || command == L"hh" || command == L"hover") {
+		CreatureObject* creature = Game::getPlayerCreature();
+		if (!creature) {
+			resultUnicode += L"\\#ff4444Player creature is null.\\#ffffff";
+			return true;
+		}
+
+		if (!creature->isRidingMount()) {
+			resultUnicode += L"\\#ff4444You must be mounted on a vehicle to use this command.\\#ffffff";
+			return true;
+		}
+
+		Object* mount = creature->getAttachedTo();
+		if (!mount) {
+			resultUnicode += L"\\#ff4444Could not find mount object.\\#ffffff";
+			return true;
+		}
+
+		// Debug mode: /emu hh debug
+		bool debugMode = (args.size() >= 3 && args[2] == L"debug");
+		if (debugMode) {
+			char dbg[512];
+			sprintf_s(dbg, sizeof(dbg),
+				"\\#88ccffMount debug:\\#ffffff\n"
+				"  creature: 0x%08X\n"
+				"  container (attachedTo): 0x%08X template=%s children=%d\n"
+				"  container +0x30: 0x%08X\n"
+				"  container +0x34: 0x%08X\n",
+				(uint32_t)creature,
+				(uint32_t)mount,
+				mount->getObjectTemplateName() ? mount->getObjectTemplateName() : "(null)",
+				mount->getNumberOfAttachedObjects(),
+				mount->getMemoryReference<uint32_t>(0x30),
+				mount->getMemoryReference<uint32_t>(0x34));
+			resultUnicode += dbg;
+
+			// Go up one more level to find the real vehicle
+			Object* vehicle = mount->getAttachedTo();
+			if (vehicle) {
+				sprintf_s(dbg, sizeof(dbg),
+					"  \\#88ccffvehicle (container->attachedTo):\\#ffffff 0x%08X template=%s children=%d\n"
+					"  vehicle +0x2C: 0x%08X  +0x30: 0x%08X\n",
+					(uint32_t)vehicle,
+					vehicle->getObjectTemplateName() ? vehicle->getObjectTemplateName() : "(null)",
+					vehicle->getNumberOfAttachedObjects(),
+					vehicle->getMemoryReference<uint32_t>(0x2C),
+					vehicle->getMemoryReference<uint32_t>(0x30));
+				resultUnicode += dbg;
+
+				int numChildren = vehicle->getNumberOfAttachedObjects();
+				for (int i = 0; i < numChildren; ++i) {
+					Object* child = vehicle->getAttachedObject(i);
+					if (!child) continue;
+					char childDbg[256];
+					sprintf_s(childDbg, sizeof(childDbg),
+						"  veh child[%d]: 0x%08X template=%s +0x30=0x%08X\n",
+						i, (uint32_t)child,
+						child->getObjectTemplateName() ? child->getObjectTemplateName() : "(null)",
+						child->getMemoryReference<uint32_t>(0x30));
+					resultUnicode += childDbg;
+				}
+			} else {
+				resultUnicode += L"  vehicle (container->attachedTo): NULL\n";
+			}
+			return true;
+		}
+
+		// Find the vehicle: player → container → vehicle (two levels up)
+		VehicleHoverDynamics* dynamics = nullptr;
+		Object* vehicle = mount->getAttachedTo();
+		if (vehicle) {
+			BaseHookedObject* dyn = vehicle->getDynamics();
+			if (dyn) {
+				dynamics = static_cast<VehicleHoverDynamics*>(dyn);
+			}
+		}
+
+		if (!dynamics) {
+			resultUnicode += L"\\#ff4444Could not find vehicle hover dynamics. Is this a hover vehicle?\\#ffffff";
+			return true;
+		}
+
+		if (args.size() < 3) {
+			float currentHeight = dynamics->getHoverHeight();
+			char msg[128];
+			sprintf_s(msg, sizeof(msg), "\\#88ccffCurrent hover height:\\#ffffff %.2f", currentHeight);
+			resultUnicode += msg;
+			return true;
+		}
+
+		auto& subcmd = args[2];
+
+		if (subcmd == L"reset") {
+			if (!s_hoverHeightStored) {
+				resultUnicode += L"\\#ff4444No original value stored — height has not been changed yet.\\#ffffff";
+				return true;
+			}
+
+			dynamics->setHoverHeight(s_originalHoverHeight);
+			s_hoverHeightStored = false;
+
+			char msg[128];
+			sprintf_s(msg, sizeof(msg), "\\#00ff00Hover height reset to default:\\#ffffff %.2f", s_originalHoverHeight);
+			resultUnicode += msg;
+			return true;
+		}
+
+		float newHeight = stof(subcmd);
+
+		if (!s_hoverHeightStored) {
+			s_originalHoverHeight = dynamics->getHoverHeight();
+			s_hoverHeightStored = true;
+		}
+
+		dynamics->setHoverHeight(newHeight);
+
+		char msg[128];
+		sprintf_s(msg, sizeof(msg), "\\#00ff00Hover height set to:\\#ffffff %.2f", newHeight);
+		resultUnicode += msg;
+
+		return true;
 	} else if (command == L"help") {
 		showHelp(resultUnicode);
 
@@ -543,5 +668,6 @@ void EmuCommandParser::showHelp(soe::unicode& resultUnicode) {
 	resultUnicode += L"/emu food - Shows current Food fill value with percentage.\n";
 	resultUnicode += L"/emu drink - Shows current Drink fill value with percentage.\n";
 	resultUnicode += L"/emu memscan - Memory scanning tools to discover PlayerObject field offsets.\n";
+	resultUnicode += L"/emu hover [value|reset] - Get/set vehicle hover height. No args shows current, 'reset' restores default.\n";
 	resultUnicode += L"/emu help - This command, which lists help info on available extension commands.\n";
 }
