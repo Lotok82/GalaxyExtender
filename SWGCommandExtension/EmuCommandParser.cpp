@@ -14,8 +14,9 @@
 #include "CellProperty.h"
 #include "CollisionWorld.h"
 #include "ObjectAttributeManager.h"
+#include "FoodDrinkMonitor.h"
 
-uint32_t EmuCommandParser::newVtable[3]; /* = { 0x161E6CC, 0x15EA3C4, 0x15EA3C8 }; for reference*/
+uint32_t EmuCommandParser::newVtable[3];
 
 void EmuCommandParser::initializeVtable() {
 	INITIALIZE_VTABLE_DATA(newVtable);
@@ -28,6 +29,20 @@ void EmuCommandParser::initializeVtable() {
 float stof(const soe::unicode& str) {
 	try {
 		return std::stof(str.c_str());
+	} catch (...) {
+		return 0;
+	}
+}
+
+int parseHexOrDec(const soe::unicode& str) {
+	try {
+		const wchar_t* s = str.c_str();
+		if (s[0] == L'0' && (s[1] == L'x' || s[1] == L'X'))
+			return (int)wcstol(s, nullptr, 16);
+		else if ((s[0] >= L'A' && s[0] <= L'F') || (s[0] >= L'a' && s[0] <= L'f'))
+			return (int)wcstol(s, nullptr, 16);
+		else
+			return std::stoi(s);
 	} catch (...) {
 		return 0;
 	}
@@ -336,6 +351,164 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 		}
 
 		return true;
+	} else if (command == L"memscan") {
+		// Memory scanning tools for discovering PlayerObject field offsets
+		if (args.size() < 3) {
+			resultUnicode += L"\\#88ccffUsage:\\#ffffff\n";
+			resultUnicode += L"  /emu memscan snapshot — Save PlayerObject memory state\n";
+			resultUnicode += L"  /emu memscan diff — Compare current memory to snapshot\n";
+			resultUnicode += L"  /emu memscan search <int_value> — Find int32 in memory\n";
+			resultUnicode += L"  /emu memscan delta <hex_offset> — Read AutoDeltaVariable at offset\n";
+			resultUnicode += L"  /emu memscan dump <hex_offset> [byte_count] — Hex dump at offset\n";
+			return true;
+		}
+
+		auto& subcmd = args[2];
+
+		if (subcmd == L"snapshot" || subcmd == L"snap") {
+			if (FoodDrinkMonitor::takeSnapshot()) {
+				char msg[128];
+				sprintf_s(msg, sizeof(msg), "\\#00ff00Snapshot saved\\#ffffff (0x%X bytes from PlayerObject base)",
+					(unsigned)FoodDrinkMonitor::SCAN_RANGE);
+				resultUnicode += msg;
+			} else {
+				resultUnicode += L"\\#ff4444Failed to take snapshot.\\#ffffff PlayerObject null or memory access error.";
+			}
+		} else if (subcmd == L"diff") {
+			FoodDrinkMonitor::diffSnapshot(resultUnicode);
+		} else if (subcmd == L"search" || subcmd == L"find") {
+			if (args.size() < 4) {
+				resultUnicode += L"Usage: /emu memscan search <int_value>";
+				return true;
+			}
+			int value = parseHexOrDec(args[3]);
+			FoodDrinkMonitor::searchValue(value, resultUnicode);
+		} else if (subcmd == L"delta" || subcmd == L"adv") {
+			if (args.size() < 4) {
+				resultUnicode += L"Usage: /emu memscan delta <hex_offset>";
+				return true;
+			}
+			int offset = parseHexOrDec(args[3]);
+			FoodDrinkMonitor::readDelta(offset, resultUnicode);
+		} else if (subcmd == L"dump") {
+			if (args.size() < 4) {
+				resultUnicode += L"Usage: /emu memscan dump <hex_offset> [byte_count]";
+				return true;
+			}
+			int offset = parseHexOrDec(args[3]);
+			int count = args.size() > 4 ? parseHexOrDec(args[4]) : 64;
+			FoodDrinkMonitor::dumpMemory(offset, count, resultUnicode);
+		} else {
+			resultUnicode += L"Unknown memscan subcommand. Use /emu memscan for help.";
+		}
+
+		return true;
+	} else if (command == L"findui") {
+		// Debug tool: probe UI widget paths from root to check what resolves
+		UIManager* mgr = UIManager::gUIManager();
+		if (!mgr) { resultUnicode += L"UIManager is null"; return true; }
+		UIPage* root = mgr->GetRootPage();
+		if (!root) { resultUnicode += L"Root page is null"; return true; }
+
+		static const char* prefixes[] = {
+			"", "netStatus.", "netStatus.comp.", "netStatus.comp.food.",
+			"netStatus.comp.drink.", "PDA.", "PDA.netStatus.", "PDA.netStatus.comp.",
+			"pda.", "pdaRoot.", "page.netStatus.", "HUD.", "hud.",
+			nullptr
+		};
+
+		resultUnicode += L"\\#88ccffUI Path Search:\\#ffffff\n";
+		int found = 0;
+		for (int i = 0; prefixes[i]; ++i) {
+			char path[256];
+			sprintf_s(path, sizeof(path), "%s%s", prefixes[i], "text");
+			UIBaseObject* obj = root->GetObjectFromPath(path);
+			char line[300];
+			sprintf_s(line, sizeof(line), "  %s -> %s\n", path, obj ? "\\#00ff00FOUND\\#ffffff" : "---");
+			resultUnicode += line;
+			if (obj) found++;
+		}
+
+		// Also test the exact paths we use
+		static const char* exactPaths[] = {
+			"pda", "pda.netStatus", "pda.netStatus.comp",
+			"pda.netStatus.comp.food", "pda.netStatus.comp.food.text",
+			"pda.netStatus.comp.drink", "pda.netStatus.comp.drink.text",
+			"pda.netStatus.comp.ping", "pda.netStatus.comp.ping.text",
+			"pda.netStatus.comp.fps", "pda.netStatus.comp.fps.text",
+			"pda.netStatus.comp.food.label",
+			"workspace.pda.netStatus.comp.food.text",
+			"HudWindow.pda.netStatus.comp.food.text",
+			nullptr
+		};
+
+		resultUnicode += L"\\#88ccffExact paths:\\#ffffff\n";
+		for (int i = 0; exactPaths[i]; ++i) {
+			UIBaseObject* obj = root->GetObjectFromPath(exactPaths[i]);
+			char line[300];
+			sprintf_s(line, sizeof(line), "  %s -> %s\n", exactPaths[i], obj ? "\\#00ff00FOUND\\#ffffff" : "---");
+			resultUnicode += line;
+			if (obj) found++;
+		}
+
+		char summary[64];
+		sprintf_s(summary, sizeof(summary), "Total found: %d", found);
+		resultUnicode += summary;
+		return true;
+	} else if (command == L"stomach" || command == L"food" || command == L"drink") {
+		PlayerObject* playerObject = Game::getPlayerObject();
+
+		if (!playerObject) {
+			resultUnicode += L"PlayerObject is null - not logged in?";
+			return true;
+		}
+
+		if (!playerObject->hasFoodDrinkAddresses()) {
+			resultUnicode += L"\\#ff4444Food/Drink not available.\\#ffffff Offsets not configured in PlayerObject.h.";
+			return true;
+		}
+
+		int food = playerObject->getFood();
+		int maxFood = playerObject->getMaxFood();
+		int drink = playerObject->getDrink();
+		int maxDrink = playerObject->getMaxDrink();
+
+		if (command == L"food") {
+			char message[128];
+			if (maxFood > 0) {
+				int pct = (food * 100) / maxFood;
+				sprintf_s(message, sizeof(message), "Food: %d / %d (%d%%)", food, maxFood, pct);
+			} else {
+				sprintf_s(message, sizeof(message), "Food: %d / %d", food, maxFood);
+			}
+			resultUnicode += message;
+		} else if (command == L"drink") {
+			char message[128];
+			if (maxDrink > 0) {
+				int pct = (drink * 100) / maxDrink;
+				sprintf_s(message, sizeof(message), "Drink: %d / %d (%d%%)", drink, maxDrink, pct);
+			} else {
+				sprintf_s(message, sizeof(message), "Drink: %d / %d", drink, maxDrink);
+			}
+			resultUnicode += message;
+		} else {
+			// "stomach" - show both
+			char message[256];
+			if (maxFood > 0 && maxDrink > 0) {
+				int foodPct = (food * 100) / maxFood;
+				int drinkPct = (drink * 100) / maxDrink;
+				sprintf_s(message, sizeof(message),
+					"Food: %d / %d (%d%%)  |  Drink: %d / %d (%d%%)",
+					food, maxFood, foodPct, drink, maxDrink, drinkPct);
+			} else {
+				sprintf_s(message, sizeof(message),
+					"Food: %d / %d  |  Drink: %d / %d",
+					food, maxFood, drink, maxDrink);
+			}
+			resultUnicode += message;
+		}
+
+		return true;
 	} else if (command == L"help") {
 		showHelp(resultUnicode);
 
@@ -366,5 +539,9 @@ void EmuCommandParser::showHelp(soe::unicode& resultUnicode) {
 	resultUnicode += L"/emu getradialflora - Prints the current Radial Flora Distance value to the chat.\n";
 	resultUnicode += L"</emu getncflora|/emu getnoncollidableflora> - Prints the current Non-Collidable Flora Distance value to the chat.\n";
 	resultUnicode += L"</emu setall|/emu overrideall> <default|low|medium|high|ultra> - Sets all graphics settings to preset values. Type /overrideall help for info on each preset.\n";
+	resultUnicode += L"/emu stomach - Shows current Food and Drink fill values with percentages.\n";
+	resultUnicode += L"/emu food - Shows current Food fill value with percentage.\n";
+	resultUnicode += L"/emu drink - Shows current Drink fill value with percentage.\n";
+	resultUnicode += L"/emu memscan - Memory scanning tools to discover PlayerObject field offsets.\n";
 	resultUnicode += L"/emu help - This command, which lists help info on available extension commands.\n";
 }

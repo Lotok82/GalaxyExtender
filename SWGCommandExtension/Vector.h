@@ -1,18 +1,10 @@
 #pragma once
 
 #include "soewrappers.h"
-
+#include <cmath>
 class Vector {
 protected:
 	float values[3];
-
-public:
-	/*static const Vector ZERO;
-
-	//Axis Representations
-	static const Vector UNIT_X;
-	static const Vector UNIT_Y;
-	static const Vector UNIT_Z;*/
 
 public:
 	inline Vector() {
