@@ -5,8 +5,12 @@
 #include "Game.h"
 #include "Graphics.h"
 #include "InputMap.h"
+#include "FoodDrinkMonitor.h"
 
 void GroundScene::parseMessages(InputMap* map) {
+	// Update food/drink values on the net status UI panel
+	FoodDrinkMonitor::updateNetStatusUI();
+
 	MessageQueue* queue = map->getMessageQueue();
 
 	bool reset = false;

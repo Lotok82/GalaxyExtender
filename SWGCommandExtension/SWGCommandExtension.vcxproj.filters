@@ -180,6 +180,9 @@
     <ClInclude Include="EmuCommandParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="FoodDrinkMonitor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UIMessage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -233,5 +236,11 @@
     <ClCompile Include="EmuCommandParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="FoodDrinkMonitor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
   </ItemGroup>
 </Project>
