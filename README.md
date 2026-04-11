@@ -1,6 +1,6 @@
 # GalaxyExtender
 
-Client-side enhancements for Star Wars Galaxies (SWGEmu). Adds graphics overrides, food/drink tracking, and quality-of-life commands.
+Client-side enhancements for Star Wars Galaxies (SWGEmu). Adds graphics overrides, food/drink tracking, vehicle hover height control, and quality-of-life commands.
 
 ## Setup
 
@@ -55,6 +55,16 @@ All commands begin with `/emu` and are typed in the console or chat window.
 | Command | Description |
 |---------|-------------|
 | `/emu assist2` | Target your current target's target |
+
+### Vehicle Hover Height
+
+Adjust the hover height of jetpacks, speeders, and other hover vehicles while mounted. Changes are visible to you only (client-side).
+
+| Command | Description |
+|---------|-------------|
+| `/emu hover` | Show current hover height |
+| `/emu hover <value>` | Set hover height in game units (e.g. `5.0` for high, `0.2` for low) |
+| `/emu hover reset` | Restore the original hover height |
 
 ### Other
 
