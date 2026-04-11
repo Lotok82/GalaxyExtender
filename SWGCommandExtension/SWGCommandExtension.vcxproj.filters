@@ -183,6 +183,9 @@
     <ClInclude Include="FoodDrinkMonitor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="CustomizationData.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="UIMessage.h">
       <Filter>Header Files</Filter>
     </ClInclude>

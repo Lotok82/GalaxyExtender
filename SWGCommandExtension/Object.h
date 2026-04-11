@@ -228,6 +228,10 @@ public:
 		return getMemoryReference<Controller*>(0x2C);
 	}
 
+	BaseHookedObject* getDynamics() {
+		return getMemoryReference<BaseHookedObject*>(0x30);
+	}
+
 	soe::vector<Object*>* getAttachedObjects() {
 		return getMemoryReference<soe::vector<Object*>*>(0x38);
 	}
@@ -350,5 +354,9 @@ public:
 
 	const char* getObjectTemplateName() const {
 		return runMethod<0x00B23C40, const char*>();
+	}
+
+	BaseHookedObject* getProperty(const uint32_t& propertyId) {
+		return runMethod<0x00B23EE0, BaseHookedObject*>(propertyId);
 	}
 };
