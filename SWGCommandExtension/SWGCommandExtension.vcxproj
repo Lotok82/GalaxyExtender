@@ -177,6 +177,7 @@
     <ClInclude Include="CuiConsoleHelperParserStrategy.h" />
     <ClInclude Include="CuiMediator.h" />
     <ClInclude Include="CuiMediatorFactory.h" />
+    <ClInclude Include="CustomizationData.h" />
     <ClInclude Include="CuiWidget3dObjectListViewer.h" />
     <ClInclude Include="EmuCommandParser.h" />
     <ClInclude Include="FoodDrinkMonitor.h" />
