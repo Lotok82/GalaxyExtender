@@ -13,5 +13,12 @@ class CuiChatParser : public BaseHookedObject {
 public:
 	static bool parse(const soe::unicode& command, soe::unicode& result, uint32_t chatRoomID, bool useChatRoom);
 
+	// --- Stage 2 S1/S2 send-path spike (Documentation/discord-stage2-plan.md) ---
+	// parse() records (chatRoomID, useChatRoom, text) for every line the player
+	// submits and caches the most recent room-routed id. Main thread only, like
+	// parse itself.
+	static void appendRoomLog(soe::unicode& out);                        // /emu discord rooms
+	static bool injectChat(const soe::unicode& text, soe::unicode& out); // /emu discord inject
+
 	DEFINE_HOOK(COMMAND_HANDLER_ADDRESS, parse, originalParse);
 };
