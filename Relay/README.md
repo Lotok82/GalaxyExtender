@@ -7,7 +7,7 @@ this file is the operational reference and the wire contract the C++ side codes 
 - **Target:** `net8.0`, ASP.NET Core minimal API
 - **Host:** IIS shared hosting (Plesk), in-process (`AspNetCoreModuleV2`), dedicated app pool, 1 worker process
 - **Live at:** `https://example.invalid/relay` — subfolder registered as an IIS application
-- **Status:** **Phases 0–5 of 7 complete — forwarding is implemented.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. 65 tests. Remaining: Phase 6 (post-deploy hardening checks), Phase 7 (Stage 2 `/messages` stub).
+- **Status:** **Phases 0–5 and 7 of 7 complete — forwarding is implemented, the Stage 2 `/messages` stub is live.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` carries the pinned Stage 2 claim contract and answers empty + `X-Relay-Stage2: disabled` until the Discord read path (R3) is built. 77 tests. Remaining: Phase 6 (post-deploy hardening checks).
 
 Verified on the host 2026-08-05: .NET 8.0.29 / Windows Server 2019, outbound to discord.com reachable (200 in 194 ms), `App_Data` writable, `process.id` stable across 4 minutes, `isHttps` reported correctly so `RequireHttps` is enabled.
 
@@ -217,11 +217,64 @@ clients must budget bytes when assembling a batch (the extension does; see its
 
 Rate limit: `RateLimitPermitsPerMinute` (120) per key per minute, fixed window, no queue — rejections get `429` with `Retry-After`. Partitioned on a hash of the key — never the key itself — and only once the key has **validated**; missing or unrecognised keys share a per-IP partition, so rotating random keys cannot mint fresh permit buckets. `/health` carries no policy, so diagnostics stay reachable while a client is throttled.
 
-### `GET /messages?after=<cursor>&limit=50` — Stage 2 placeholder (not yet implemented)
+### `GET /messages?client=<id>` — Discord → game work queue (Stage 2)
 
-Phase 7 will ship it returning `{ "messages": [], "cursor": "<echo>" }` plus header
-`X-Relay-Stage2: disabled` until the bot token exists, so the extension's polling path can be
-built and exercised against the real endpoint.
+**This is a work-queue CONSUME, not a broadcast read.** A successful `200` marks every returned
+message as **claimed by this key+client**: no other poller receives it unless the claim expires.
+The claimant is expected to inject each message into the guild room as
+`[Discord] <author>: <text>`; the injected line re-entering the relay through the Stage 1 capture
+is the **delivery ack** (matched by the marker — see the Stage 2 plan's "Marker and echo rules").
+If no ack arrives within the **redelivery timeout of 60 s**, the message is handed to the next
+poller; after **2 redeliveries** it is dropped and counted in `dropped`. Delivery is therefore
+at-least-once — rare duplicates are accepted by design, silent loss is not.
+
+There is deliberately **no `after=<cursor>` parameter**: under claim semantics the relay owns the
+queue position, and a client cursor would fight redelivery (a redelivered message is by definition
+"before" a cursor the client has already advanced past). Unknown query parameters are ignored.
+
+```
+GET /api/v1/messages?client=kaelen
+X-Relay-Key: <key>
+```
+
+`client` is required: ≤ 64 chars, no control characters — same rules as `/chat`'s `client.id`. It
+attributes claims for redelivery accounting and logging; it is **not** authentication and is not
+trusted beyond that.
+
+```jsonc
+{
+  "messages": [
+    { "id": "1402691702617341952",          // Discord snowflake, unique, ascending
+      "author": "Bob",                       // display name, sanitized, clamped ≤ 32 chars
+      "text": "anyone on tonight?",          // sanitized, clamped (see below)
+      "timestampUtc": "2026-08-05T21:14:09+00:00" }
+  ],
+  "dropped": 0
+}
+```
+
+- Messages arrive **oldest first** (ascending id), at most **5 per poll** — sized so a claimant
+  injecting at the game-safe ~1 line/s finishes well inside the 60 s claim window.
+- `dropped` counts messages discarded since the last poll that reported them (TTL expiry — the
+  pending queue drops anything older than ~5 min when no client was online — or the redelivery
+  cap). Report-once: each loss is reported to exactly one poller, so the extension can surface
+  "N Discord messages were missed" without double counting.
+- `text` is pre-sanitized by the relay (R5: mentions/emoji resolved, newlines collapsed, SWG
+  escapes stripped — the Core3 server does not strip `\#` colour codes itself) and pre-clamped:
+  `author` ≤ 32 chars, `text` ≤ 200 chars, so the full injected line
+  `[Discord] <author>: <text>` is ≤ 244 chars. Core3 enforces **no** room-message length limit
+  (S4 finding), so this bound is ours: it mirrors the game's own 255-char spatial-chat
+  convention and keeps the re-captured line inside `/chat`'s 512-char `MaxLineLength`. The
+  client injects verbatim and never needs to truncate.
+- Header `X-Relay-Stage2: disabled` until the Discord read path (R3) is configured and enabled,
+  then `enabled`. An unconfigured Stage 2 still answers `200` with an empty list — deliberately
+  **not** `503`, so the extension's poll loop treats "bridge off" as the ordinary idle case
+  rather than an error worth backing off from.
+
+Status codes: `400` missing/invalid `client` (RFC 7807 body) · `401` missing/bad key · `429`
+rate-limited (`Retry-After`) — same per-key/per-IP partitions and the same
+`RateLimitPermitsPerMinute` budget as `/chat`, so a client's polls and posts draw from one
+bucket.
 
 ### `POST /heartbeat`
 

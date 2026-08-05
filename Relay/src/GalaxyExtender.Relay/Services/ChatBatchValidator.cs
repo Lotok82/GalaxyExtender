@@ -13,16 +13,17 @@ namespace GalaxyExtender.Relay.Services;
 /// </summary>
 public static class ChatBatchValidator
 {
-    private const int MaxIdentifierLength = 64;
+    /// <summary>Shared with the /messages `client` query parameter, which follows the same rules.</summary>
+    internal const int MaxIdentifierLength = 64;
 
-    private const string ControlCharacterError = "Must not contain control characters.";
+    internal const string ControlCharacterError = "Must not contain control characters.";
 
     /// <summary>
     /// C0 controls and DEL are rejected everywhere. The extension maps them to spaces before
     /// sending, so a legal client never trips this; rejecting them here keeps forged newlines out
     /// of the relay's own log lines and out of the Phase 3 Discord messages.
     /// </summary>
-    private static bool ContainsControlCharacters(string value)
+    internal static bool ContainsControlCharacters(string value)
     {
         foreach (var c in value)
         {
