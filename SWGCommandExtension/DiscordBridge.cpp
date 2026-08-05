@@ -112,6 +112,7 @@ std::vector<ObservedChannel> s_observed;
 std::string s_lastRelayedText;
 unsigned long long s_lastRelayedFrame = 0;
 ULONGLONG s_lastRelayedTick = 0;
+const void* s_lastRelayedTab = nullptr;   // identity only, never dereferenced
 
 // --- cross-thread flags ---
 volatile LONG s_authFailed = 0;   // 401 latch: bad key, retrying cannot help
@@ -423,32 +424,31 @@ std::string clampLabel(const std::wstring& value) {
 	return narrow;
 }
 
+// The default id must be stable per machine WITHOUT identifying it: hostnames
+// frequently embed real names ("JAMES-LAPTOP"), and this value travels with
+// every batch and sits in the relay's logs. FNV-1a of the computer name keeps
+// the dedupe/diagnostic value and drops the PII; anyone who wants a readable
+// id sets client_id in the ini.
 std::string defaultClientId() {
 	char name[MAX_COMPUTERNAME_LENGTH + 1];
 	DWORD size = static_cast<DWORD>(_countof(name));
 
-	std::string id;
+	if (!GetComputerNameA(name, &size) || size == 0)
+		return "unknown-client";
 
-	if (GetComputerNameA(name, &size) && size > 0) {
-		id.assign(name, size);
+	unsigned long long hash = 14695981039346656037ULL;
+
+	for (DWORD i = 0; i < size; ++i) {
+		hash ^= static_cast<unsigned char>(name[i]);
+		hash *= 1099511628211ULL;
 	}
 
-	std::string sanitised;
-	for (size_t i = 0; i < id.size(); ++i) {
-		char c = id[i];
-		if ((c >= 'A' && c <= 'Z'))
-			c = static_cast<char>(c - 'A' + 'a');
-		if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
-			sanitised.push_back(c);
-	}
+	char id[32];
+	sprintf_s(id, sizeof(id), "client-%08lx%08lx",
+		static_cast<unsigned long>(hash >> 32),
+		static_cast<unsigned long>(hash & 0xFFFFFFFFUL));
 
-	if (sanitised.empty())
-		sanitised = "unknown-client";
-
-	if (sanitised.size() > 64)
-		sanitised.resize(64);
-
-	return sanitised;
+	return id;
 }
 
 // Builds a fresh Config from the ini. Caller assigns it under the lock.
@@ -478,13 +478,23 @@ Config loadConfigFromDisk() {
 	std::wstring character = readIniValue(path, L"character", L"");
 	std::wstring galaxy = readIniValue(path, L"galaxy", L"");
 	std::wstring channelType = readIniValue(path, L"channel_type", L"");
+	std::wstring allowHttp = readIniValue(path, L"allow_http", L"0");
 
 	config.enabled = !(enabled == L"0" || enabled == L"false" || enabled == L"no");
 
 	if (!channelType.empty()) {
-		int parsed = _wtoi(channelType.c_str());
-		if (parsed >= 0)
-			config.channelType = parsed;
+		// Strict parse. _wtoi would turn "guild" (or any typo) into 0 and
+		// silently retarget the bridge to channel type 0; a value that is not
+		// a plain non-negative number must fail loudly instead.
+		wchar_t* parseEnd = nullptr;
+		long parsed = wcstol(channelType.c_str(), &parseEnd, 10);
+
+		if (parseEnd == channelType.c_str() || *parseEnd != L'\0' || parsed < 0) {
+			config.error = "channel_type in DiscordBridge.ini is not a non-negative number";
+			return config;
+		}
+
+		config.channelType = static_cast<int>(parsed);
 	}
 
 	config.clientId = clampLabel(clientId);
@@ -506,6 +516,15 @@ Config loadConfigFromDisk() {
 
 	if (!parseEndpoint(endpoint, config))
 		return config;
+
+	if (!config.https &&
+		!(allowHttp == L"1" || allowHttp == L"true" || allowHttp == L"yes")) {
+		// Over plain http the X-Relay-Key header and all captured guild chat
+		// travel in cleartext on every hop. Refuse unless explicitly accepted.
+		config.error = "endpoint is http:// so the relay key would travel unencrypted; "
+			"use https, or set allow_http=1 to accept the risk";
+		return config;
+	}
 
 	config.key = key;
 	config.valid = true;
@@ -954,7 +973,11 @@ DWORD WINAPI workerMain(LPVOID) {
 	if (s_doneEvent != nullptr)
 		SetEvent(s_doneEvent);
 
-	return 0;
+	// Releases startWorker()'s module pin and exits WITHOUT executing another
+	// instruction of module code. A plain return would still run this
+	// function's epilogue and the CRT thread thunk inside the image — a race
+	// against an unloader that saw s_doneEvent and proceeded to unmap.
+	FreeLibraryAndExitThread(s_module, 0);
 }
 
 // ============================================================================
@@ -965,18 +988,42 @@ void startWorker() {
 	if (s_worker != nullptr)
 		return;
 
-	s_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-	s_doneEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	// Events are kept across failed attempts rather than recreated, so a
+	// CreateThread failure does not leak a fresh pair on every retry.
+	if (s_stopEvent == nullptr)
+		s_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	if (s_doneEvent == nullptr)
+		s_doneEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
 	if (s_stopEvent == nullptr || s_doneEvent == nullptr) {
 		logLine("could not create worker events (%lu)", GetLastError());
 		return;
 	}
 
+	// Pin the DLL for the worker's lifetime. Without this a FreeLibrary from
+	// the injector can unmap the module while the worker sits inside a
+	// synchronous WinHTTP call (the per-stage timeouts add up to ~25 s, far
+	// beyond any join shutdown() could afford under the loader lock), and the
+	// worker then executes unmapped code — a client crash, not a leak. With
+	// the pin, an external FreeLibrary while the bridge runs leaves the DLL
+	// resident and working; the worker releases the pin as its final act via
+	// FreeLibraryAndExitThread, and only then can the unload complete.
+	HMODULE pin = nullptr;
+
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+			reinterpret_cast<LPCWSTR>(&startWorker), &pin)) {
+		logLine("could not pin the module for the worker (%lu)", GetLastError());
+		return;
+	}
+
 	s_worker = CreateThread(nullptr, 0, workerMain, nullptr, 0, nullptr);
 
-	if (s_worker == nullptr)
+	if (s_worker == nullptr) {
 		logLine("could not create worker thread (%lu)", GetLastError());
+		// Reference-count decrement only: the injector still holds its own
+		// reference, so this cannot unmap the code currently executing.
+		FreeLibrary(pin);
+	}
 }
 
 // Deferred out of DllMain deliberately: ini reads and CreateThread both do
@@ -1038,20 +1085,27 @@ void noteChannelType(int type, const std::wstring& cleaned) {
 }
 
 // One client showing the guild channel in several tabs or windows produces
-// several appendText calls for a single message, all inside one dispatch. The
-// relay cannot tell that from a genuine repeat, so collapse it here before
-// occurrence is computed. The tick check keeps genuine repeats flowing if the
-// frame counter is not advancing (GroundScene::parseMessages only ticks in the
-// ground scene); duplicate calls within one dispatch are microseconds apart.
-bool localDuplicate(const std::string& text, ULONGLONG now) {
+// several appendText calls for a single message, all inside one dispatch — one
+// call per Tab object. The relay cannot tell that from a genuine repeat, so
+// collapse it here before occurrence is computed. The tab identity is the
+// discriminator: fan-out duplicates arrive on DIFFERENT tabs, while a genuine
+// repeat of the same text re-enters through the SAME tab — without this, two
+// identical messages landing in one frame would collapse on every guild
+// member's client at once and the second would never reach Discord, the exact
+// case the occurrence scheme exists to protect. The tick check keeps genuine
+// repeats flowing if the frame counter is not advancing
+// (GroundScene::parseMessages only ticks in the ground scene); duplicate calls
+// within one dispatch are microseconds apart.
+bool localDuplicate(const std::string& text, const void* tab, ULONGLONG now) {
 	if (text == s_lastRelayedText && s_frameCounter == s_lastRelayedFrame &&
-		(now - s_lastRelayedTick) < DEDUPE_WINDOW_MS) {
+		(now - s_lastRelayedTick) < DEDUPE_WINDOW_MS && tab != s_lastRelayedTab) {
 		return true;
 	}
 
 	s_lastRelayedText = text;
 	s_lastRelayedFrame = s_frameCounter;
 	s_lastRelayedTick = now;
+	s_lastRelayedTab = tab;
 
 	return false;
 }
@@ -1227,10 +1281,14 @@ void DiscordBridge::shutdown(bool processExiting) {
 		if (s_stopEvent != nullptr)
 			SetEvent(s_stopEvent);
 
+		// Belt-and-braces: the worker's module pin (startWorker) means a
+		// FreeLibrary-driven detach cannot actually reach this point while the
+		// worker is alive — the unload only proceeds once the worker has
+		// released the pin. If we do time out anyway, leaking the handles and
+		// the lock is strictly better than freeing memory the worker still
+		// reads.
 		if (s_doneEvent == nullptr ||
 			WaitForSingleObject(s_doneEvent, WORKER_JOIN_TIMEOUT_MS) != WAIT_OBJECT_0) {
-			// Mid-request and unresponsive. Leaking the handles and the lock is
-			// strictly better than freeing memory the worker still reads.
 			logLine("worker did not stop in time; leaving resources allocated");
 			return;
 		}
@@ -1264,10 +1322,9 @@ void DiscordBridge::onFrame() {
 // Chat capture
 // ============================================================================
 
-void DiscordBridge::onChatAppend(const void* channelId, const void* chatString) {
-	if (channelId == nullptr || chatString == nullptr)
-		return;
+namespace {
 
+void onChatAppendImpl(const void* tab, const void* channelId, const void* chatString) {
 	if (!ensureInitialized())
 		return;
 
@@ -1300,7 +1357,7 @@ void DiscordBridge::onChatAppend(const void* channelId, const void* chatString) 
 		return;
 
 	std::wstring cleaned;
-	cleanChatText(raw, rawLength, cleaned);
+	DiscordBridge::cleanChatText(raw, rawLength, cleaned);
 
 	if (newType)
 		noteChannelType(channelType, cleaned);
@@ -1319,19 +1376,36 @@ void DiscordBridge::onChatAppend(const void* channelId, const void* chatString) 
 
 	std::string utf8;
 
-	if (!utf16ToUtf8(cleaned.c_str(), cleaned.size(), utf8) || utf8.empty())
+	if (!DiscordBridge::utf16ToUtf8(cleaned.c_str(), cleaned.size(), utf8) || utf8.empty())
 		return;
 
 	ULONGLONG now = GetTickCount64();
 
-	if (localDuplicate(utf8, now))
+	if (localDuplicate(utf8, tab, now))
 		return;
 
 	enqueue(utf8, computeOccurrence(utf8, now));
 }
 
+} // anonymous namespace
+
+void DiscordBridge::onChatAppend(const void* tab, const void* channelId, const void* chatString) {
+	if (channelId == nullptr || chatString == nullptr)
+		return;
+
+	// The header promises nothing here can throw into the game's chat
+	// dispatch. The string work in the impl can throw bad_alloc when the
+	// 32-bit address space is exhausted — trading "drop one chat line" for a
+	// client crash is never right, so fence it. (C++ EH only: the raw client
+	// memory reads are behind the SEH-guarded seh_* functions.)
+	try {
+		onChatAppendImpl(tab, channelId, chatString);
+	} catch (...) {
+	}
+}
+
 void SwgCuiChatWindowTab::appendText(const ChatChannelId& id, const soe::unicode& text) {
-	DiscordBridge::onChatAppend(&id, &text);
+	DiscordBridge::onChatAppend(this, &id, &text);
 
 	originalAppendText::run(this, id, text);
 }

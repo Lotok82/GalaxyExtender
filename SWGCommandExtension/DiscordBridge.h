@@ -19,10 +19,14 @@
 //   enabled=1
 //   endpoint=https://example.invalid/relay
 //   key=<X-Relay-Key handed out by the relay operator>
-//   client_id=kaelen          ; optional, relay logging only
+//   client_id=kaelen          ; optional, relay logging only (defaults to an
+//                             ; anonymous per-machine hash, never the hostname)
 //   character=Kaelen          ; optional, relay logging only
 //   galaxy=Basilisk           ; optional, relay logging only
-//   channel_type=9            ; optional, CT_guild override (see below)
+//   channel_type=9            ; optional, CT_guild override (see below);
+//                             ; must be a plain non-negative number
+//   allow_http=0              ; http:// endpoints are refused unless set to 1
+//                             ; (the key would travel in cleartext)
 //
 // Threading: everything in the hook path runs on the game's main thread and
 // must never block — clean, enqueue, return. All HTTP happens on the worker
@@ -49,11 +53,14 @@ public:
 	static void onFrame();
 
 	// From the SwgCuiChatWindow::Tab::appendText hook, main thread.
-	// Both pointers are raw client objects read with SEH guards:
+	// tab is the Tab object's this-pointer, used ONLY as an identity for the
+	// multi-tab dedupe — never dereferenced. The other two are raw client
+	// objects read with SEH guards:
 	//   channelId  -> ChannelId, int type at +0x0
 	//   chatString -> Unicode::String, {begin, end} wchar_t pointers at +0x0/+0x4
-	// Nothing here can throw or block; the caller always runs the original.
-	static void onChatAppend(const void* channelId, const void* chatString);
+	// Nothing here can throw or block (a catch-all fences bad_alloc); the
+	// caller always runs the original.
+	static void onChatAppend(const void* tab, const void* channelId, const void* chatString);
 
 	// --- /emu discord ---
 	static bool isEnabled();

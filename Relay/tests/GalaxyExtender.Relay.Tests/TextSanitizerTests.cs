@@ -42,6 +42,19 @@ public sealed class TextSanitizerTests
         Assert.Equal(@"\`code\` \*bold\* \_under\_ \~strike\~ \|spoil\| back\\slash", result);
     }
 
+    /// <summary>
+    /// Embed descriptions (unlike plain messages) render [text](url) as a masked hyperlink —
+    /// unescaped brackets would let a player publish a link whose visible text hides the target,
+    /// authored by the relay.
+    /// </summary>
+    [Fact]
+    public void ForDiscord_escapes_masked_link_syntax()
+    {
+        var result = TextSanitizer.ForDiscord("[Guild bank payout](https://phishing.example/steal)", 512);
+
+        Assert.Equal(@"\[Guild bank payout\](https://phishing.example/steal)", result);
+    }
+
     [Fact]
     public void ForDiscord_escapes_blockquote_only_at_line_start()
     {

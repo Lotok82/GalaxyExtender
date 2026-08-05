@@ -92,6 +92,11 @@ public static class TextSanitizer
                 case '_':
                 case '~':
                 case '|':
+                // [ and ] matter here even though plain messages render them literally: EMBED
+                // descriptions render [text](url) as a masked hyperlink, which would let a player
+                // publish a link whose visible text hides the target — authored by the relay.
+                case '[':
+                case ']':
                     builder.Append('\\').Append(c);
                     break;
 
