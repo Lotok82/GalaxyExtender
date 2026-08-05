@@ -29,6 +29,7 @@ public static class ChatEndpoints
                 DedupeService dedupe,
                 DiscordPublisher publisher,
                 Outbox outbox,
+                Stage2Queue stage2Queue,
                 ILogger<ChatBatch> logger,
                 CancellationToken cancellationToken) =>
             {
@@ -65,15 +66,28 @@ public static class ChatEndpoints
 
                 // Dedupe on the normalised form; forward the display form. The key MUST come from
                 // the normalised text or two clients could disagree after presentation escaping.
-                var prepared = lines
-                    .Select(line =>
+                //
+                // Marked lines — a bridged Discord message re-entering through the Stage 1
+                // capture — peel off first: they are the Stage 2 delivery ack and are NEVER
+                // forwarded to Discord, matched or not (stage2 plan, "Marker and echo rules").
+                // Every relaying client sends its own copy; acking is idempotent.
+                var markedLines = 0;
+                var prepared = new List<(string Key, string Display)>(lines.Count);
+
+                foreach (var line in lines)
+                {
+                    var normalized = TextSanitizer.Normalize(line.Text!);
+
+                    if (stage2Queue.TryAckMarkedLine(normalized))
                     {
-                        var normalized = TextSanitizer.Normalize(line.Text!);
-                        return (
-                            Key: DedupeService.Key(normalized, line.Occurrence!.Value),
-                            Display: TextSanitizer.ForDiscord(normalized, relayOptions.CurrentValue.MaxLineLength));
-                    })
-                    .ToList();
+                        markedLines++;
+                        continue;
+                    }
+
+                    prepared.Add((
+                        DedupeService.Key(normalized, line.Occurrence!.Value),
+                        TextSanitizer.ForDiscord(normalized, relayOptions.CurrentValue.MaxLineLength)));
+                }
 
                 var admission = dedupe.Admit(batchId, clientId, prepared);
 
@@ -131,19 +145,23 @@ public static class ChatEndpoints
                     }
                 }
 
-                var response = new ChatBatchResponse(accepted, admission.Deduped, queued, retryAfterMs);
+                // Marked lines count as accepted — the relay took responsibility for them (as
+                // acks), it just never forwards them. Keeps the client's counters honest.
+                var response = new ChatBatchResponse(
+                    accepted + markedLines, admission.Deduped, queued, retryAfterMs);
                 dedupe.Complete(batchId, response, forwardedSomething: accepted > 0);
 
                 logger.LogInformation(
                     "Batch {BatchId} from key={KeyLabel} client={ClientId} character={Character}: " +
-                    "{Accepted} forwarded, {Deduped} deduped, {Queued} queued",
+                    "{Accepted} forwarded, {Deduped} deduped, {Queued} queued, {Marked} marked",
                     batchId,
                     http.Items[ApiKeyAuthenticationMiddleware.KeyLabelItem],
                     clientId,
                     batch.Client.Character,
                     accepted,
                     admission.Deduped,
-                    queued);
+                    queued,
+                    markedLines);
 
                 http.Response.Headers[ForwardingHeader] = "enabled";
 

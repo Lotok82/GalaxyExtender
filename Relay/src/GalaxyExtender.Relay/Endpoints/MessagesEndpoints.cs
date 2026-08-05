@@ -1,5 +1,8 @@
 using GalaxyExtender.Relay.Contracts;
+using GalaxyExtender.Relay.Middleware;
+using GalaxyExtender.Relay.Options;
 using GalaxyExtender.Relay.Services;
+using Microsoft.Extensions.Options;
 
 namespace GalaxyExtender.Relay.Endpoints;
 
@@ -8,10 +11,11 @@ namespace GalaxyExtender.Relay.Endpoints;
 /// the returned messages for the polling key+client until the redelivery timeout — see the
 /// "Stage 2" section of README.md for the pinned contract.
 ///
-/// Currently the R1 stub: authenticates and rate-limits exactly like /chat, validates the
-/// contract, and always answers an empty queue with <c>X-Relay-Stage2: disabled</c> — so the
-/// extension's whole poll path can be built and harness-tested before the Discord read (R3)
-/// exists. Nothing here may change /chat behaviour.
+/// R3 live: when Stage 2 is configured (bot token + channel + enabled flag), each poll first
+/// gives <see cref="DiscordReader"/> a chance to refresh the pending queue (rate-capped by its
+/// cache window, so the Discord-facing request rate is independent of player count), then claims
+/// from <see cref="Stage2Queue"/>. Unconfigured behaves exactly like the R1 stub: 200 + empty +
+/// <c>X-Relay-Stage2: disabled</c>, never 503 — bridge-off is the ordinary idle case.
 /// </summary>
 public static class MessagesEndpoints
 {
@@ -25,18 +29,41 @@ public static class MessagesEndpoints
     public static void MapMessagesEndpoints(this IEndpointRouteBuilder app)
     {
         // Authentication comes from ApiKeyAuthenticationMiddleware on the /api prefix, like /chat.
-        app.MapGet("/api/v1/messages", (string? client, HttpContext http) =>
+        app.MapGet("/api/v1/messages", async (
+                string? client,
+                HttpContext http,
+                IOptionsMonitor<DiscordOptions> discordOptions,
+                DiscordReader reader,
+                Stage2Queue queue,
+                Outbox outbox,
+                CancellationToken cancellationToken) =>
             {
                 if (!TryValidateClient(client, out var errors))
                 {
                     return Results.ValidationProblem(errors);
                 }
 
-                // Contract: an unconfigured Stage 2 is the ordinary idle case, not an error —
-                // 200 + empty + "disabled", never 503, so the poll loop needs no special casing.
-                http.Response.Headers[Stage2Header] = "disabled";
+                if (!discordOptions.CurrentValue.IsStage2Configured)
+                {
+                    // Contract: an unconfigured Stage 2 is the ordinary idle case, not an error —
+                    // 200 + empty + "disabled", never 503, so the poll loop needs no special casing.
+                    http.Response.Headers[Stage2Header] = "disabled";
 
-                return Results.Ok(new MessagesResponse([], Dropped: 0));
+                    return Results.Ok(new MessagesResponse([], Dropped: 0));
+                }
+
+                // Polls are the steadiest request stream this host sees; letting them drain the
+                // outbox gets parked game → Discord lines delivered even when nobody is chatting.
+                await outbox.DrainAsync(cancellationToken);
+
+                await reader.FetchIfDueAsync(cancellationToken);
+
+                var claimant = $"{http.Items[ApiKeyAuthenticationMiddleware.KeyLabelItem]}:{client}";
+                var response = queue.Claim(claimant);
+
+                http.Response.Headers[Stage2Header] = "enabled";
+
+                return Results.Ok(response);
             })
             .RequireRateLimiting(ChatEndpoints.RateLimitPolicy);
     }

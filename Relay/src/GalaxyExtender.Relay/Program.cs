@@ -82,10 +82,21 @@ builder.Services.AddSingleton<DedupeService>();
 builder.Services.AddSingleton<DiscordPublisher>();
 builder.Services.AddSingleton<Outbox>();
 
+// Stage 2 read path (R3-R7): on-demand channel fetch and the claim/ack work queue.
+builder.Services.AddSingleton<DiscordReader>();
+builder.Services.AddSingleton<Stage2Queue>();
+
 builder.Services.AddHttpClient(DiscordPublisher.HttpClientName, client =>
 {
     client.Timeout = TimeSpan.FromSeconds(10);
     client.DefaultRequestHeaders.UserAgent.ParseAdd("GalaxyExtenderRelay/0.2 (+https://github.com/Lotok82)");
+});
+
+builder.Services.AddHttpClient(DiscordReader.HttpClientName, client =>
+{
+    client.BaseAddress = new Uri("https://discord.com/api/v10/");
+    client.Timeout = TimeSpan.FromSeconds(10);
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("GalaxyExtenderRelay/0.3 (+https://github.com/Lotok82)");
 });
 
 // Rate limiting runs before authentication in the pipeline, so an unauthenticated flood is capped

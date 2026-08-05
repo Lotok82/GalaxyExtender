@@ -7,7 +7,7 @@ this file is the operational reference and the wire contract the C++ side codes 
 - **Target:** `net8.0`, ASP.NET Core minimal API
 - **Host:** IIS shared hosting (Plesk), in-process (`AspNetCoreModuleV2`), dedicated app pool, 1 worker process
 - **Live at:** `https://mesanderson.co.uk/relay` — subfolder registered as an IIS application
-- **Status:** **Phases 0–5 and 7 of 7 complete — forwarding is implemented, the Stage 2 `/messages` stub is live.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` carries the pinned Stage 2 claim contract and answers empty + `X-Relay-Stage2: disabled` until the Discord read path (R3) is built. 77 tests. Remaining: Phase 6 (post-deploy hardening checks).
+- **Status:** **All phases complete — forwarding AND the Stage 2 read path (R3–R7) are implemented.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` serves the pinned Stage 2 claim contract for real when `Discord:BotToken` + `Discord:ChannelId` + `Discord:Stage2Enabled` are configured (on-demand channel fetch, echo filter, sanitizer, claim/redelivery/ack store) and answers empty + `X-Relay-Stage2: disabled` otherwise. Marked lines (`[Discord] …` after the sender prefix) arriving on `/chat` are the Stage 2 delivery ack — matched exact-first-then-mask-tolerant, counted as `accepted`, and **never forwarded to Discord**. 143 tests. Remaining: Phase 6 (post-deploy hardening checks).
 
 Verified on the host 2026-08-05: .NET 8.0.29 / Windows Server 2019, outbound to discord.com reachable (200 in 194 ms), `App_Data` writable, `process.id` stable across 4 minutes, `isHttps` reported correctly so `RequireHttps` is enabled.
 
@@ -65,6 +65,15 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Discord:WebhookUrl` | — | Live credential. Must be an absolute `https://` URL or the relay reports unconfigured and answers `503`. |
 | `Discord:EmbedColor` | `3066993` | `0x2ECC71` green. |
 | `Discord:ShowContributingClient` | `false` | Debug embed field naming the client that won the dedupe race. |
+| `Discord:BotToken` | — | Live credential for the Stage 2 read path. Raw token, no `Bot ` prefix. |
+| `Discord:ChannelId` | — | Bridge channel snowflake, as a string of digits. |
+| `Discord:Stage2Enabled` | `false` | Operator kill switch: Stage 2 reads happen only when this is true AND token + channel are set. |
+| `Relay:Stage2RedeliveryTimeoutSeconds` | `60` | Unacked claim redelivery timeout (contract value; override is for tests). |
+| `Relay:Stage2MaxDeliveries` | `3` | 1 initial delivery + 2 redeliveries, then dropped and counted. |
+| `Relay:Stage2TtlSeconds` | `300` | Pending messages older than this are dropped, not injected stale. |
+| `Relay:Stage2MaxPending` | `50` | Pending queue cap; oldest dropped (counted) beyond it. |
+| `Relay:Stage2MaxPerPoll` | `5` | Messages claimed per poll. |
+| `Relay:Stage2FetchCacheSeconds` | `2.5` | Discord fetch freshness window — polls inside it skip the Discord call. |
 
 Locally:
 
@@ -224,6 +233,10 @@ message as **claimed by this key+client**: no other poller receives it unless th
 The claimant is expected to inject each message into the guild room as
 `[Discord] <author>: <text>`; the injected line re-entering the relay through the Stage 1 capture
 is the **delivery ack** (matched by the marker — see the Stage 2 plan's "Marker and echo rules").
+Ack matching is **exact first, then mask-tolerant** (same length, characters equal wherever the
+received character is not `*`) because the echoed line passes through each receiving client's
+profanity filter and can arrive masked. Marked lines count toward the batch's `accepted` and are
+never forwarded to Discord, matched or not.
 If no ack arrives within the **redelivery timeout of 60 s**, the message is handed to the next
 poller; after **2 redeliveries** it is dropped and counted in `dropped`. Delivery is therefore
 at-least-once — rare duplicates are accepted by design, silent loss is not.
