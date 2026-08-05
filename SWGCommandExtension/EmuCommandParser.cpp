@@ -640,12 +640,13 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 		// in DiscordBridge.ini beside the DLL; nothing secret is printed here.
 		if (args.size() < 3) {
 			resultUnicode += L"\\#88ccffUsage:\\#ffffff\n";
-			resultUnicode += L"  /emu discord on - enable relaying (re-reads DiscordBridge.ini)\n";
-			resultUnicode += L"  /emu discord off - stop relaying\n";
-			resultUnicode += L"  /emu discord status - state, relay host, queue depth, last HTTP result\n";
+			resultUnicode += L"  /emu discord on - enable the bridge (re-reads DiscordBridge.ini)\n";
+			resultUnicode += L"  /emu discord off - stop the bridge, both directions\n";
+			resultUnicode += L"  /emu discord status - state, relay host, queues, last HTTP results\n";
 			resultUnicode += L"  /emu discord test - queue a synthetic line\n";
+			resultUnicode += L"  /emu discord poll - poll the relay for Discord messages now (Stage 2)\n";
 			resultUnicode += L"  /emu discord types - chat channel types seen so far (guild-channel check)\n";
-			resultUnicode += L"  /emu discord rooms - room ids seen for typed lines (Stage 2 send-path spike)\n";
+			resultUnicode += L"  /emu discord rooms - room ids seen for typed lines (Stage 2 send path)\n";
 
 			return true;
 		}
@@ -666,7 +667,12 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 			resultUnicode += status.c_str();
 		} else if (subcmd == L"off") {
 			DiscordBridge::setEnabled(false);
-			resultUnicode += L"\\#ffcc00Discord bridge disabled.\\#ffffff Queued lines discarded.";
+			resultUnicode += L"\\#ffcc00Discord bridge disabled.\\#ffffff Queued lines discarded, "
+				L"both directions; unacked claims will be redelivered elsewhere.";
+		} else if (subcmd == L"poll") {
+			DiscordBridge::requestPollNow();
+			resultUnicode += L"Poll requested. Run \\#88ccff/emu discord status\\#ffffff in a few "
+				L"seconds to see the result.";
 		} else if (subcmd == L"status") {
 			std::string status;
 			DiscordBridge::appendStatus(status);
@@ -748,6 +754,6 @@ void EmuCommandParser::showHelp(soe::unicode& resultUnicode) {
 	resultUnicode += L"/emu drink - Shows current Drink fill value with percentage.\n";
 	resultUnicode += L"/emu memscan - Memory scanning tools to discover PlayerObject field offsets.\n";
 	resultUnicode += L"/emu hover [value|reset] - Get/set vehicle hover height. No args shows current, 'reset' restores default.\n";
-	resultUnicode += L"/emu discord <on|off|status|test|types|rooms> - Guild chat bridge to Discord. Needs DiscordBridge.ini beside the DLL.\n";
+	resultUnicode += L"/emu discord <on|off|status|test|poll|types|rooms> - Guild chat bridge to/from Discord. Needs DiscordBridge.ini beside the DLL.\n";
 	resultUnicode += L"/emu help - This command, which lists help info on available extension commands.\n";
 }

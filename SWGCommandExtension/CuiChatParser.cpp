@@ -53,6 +53,11 @@ uint32_t s_cachedRoomId = 0;
 unsigned long s_cachedRoomSeq = 0;
 bool s_roomIdCached = false;
 
+// Mirror of s_roomIdCached readable from the bridge's worker thread. The main
+// thread is the only writer; a plain bool read cross-thread would work on x86
+// but the interlocked mirror keeps the intent explicit.
+volatile LONG s_roomIdCachedFlag = 0;
+
 void recordTypedLine(const soe::unicode& text, uint32_t chatRoomID, bool useChatRoom) {
 	TypedLineRecord& record = s_roomLog[s_roomLogTotal % ROOM_LOG_CAPACITY];
 
@@ -72,6 +77,7 @@ void recordTypedLine(const soe::unicode& text, uint32_t chatRoomID, bool useChat
 		s_cachedRoomId = chatRoomID;
 		s_cachedRoomSeq = record.seq;
 		s_roomIdCached = true;
+		InterlockedExchange(&s_roomIdCachedFlag, 1);
 	}
 }
 
@@ -137,6 +143,22 @@ bool CuiChatParser::injectChat(const soe::unicode& text, soe::unicode& out) {
 	}
 
 	return true;
+}
+
+bool CuiChatParser::injectRoom(const wchar_t* text, size_t length) {
+	if (!s_roomIdCached || text == nullptr || length == 0)
+		return false;
+
+	// Same confirmed mechanism as injectChat, without the diagnostic output.
+	// Not routed through our parse() so the injected line is not re-recorded.
+	soe::unicode line(text, static_cast<uint32_t>(length));
+	soe::unicode echo;
+
+	return originalParse::run(line, echo, s_cachedRoomId, true);
+}
+
+bool CuiChatParser::hasCachedRoomId() {
+	return InterlockedCompareExchange(&s_roomIdCachedFlag, 0, 0) != 0;
 }
 
 bool CuiChatParser::parse(const soe::unicode& incomingCommand, soe::unicode& resultUnicode, uint32_t chatRoomID, bool useChatRoom) {

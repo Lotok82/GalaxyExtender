@@ -277,3 +277,7 @@ __pycache__/
 # Extension side: relay endpoint URL + X-Relay-Key, sits beside the DLL.
 DiscordBridge.ini
 # Relay side: see Relay/.gitignore for appsettings.Production.json etc.
+
+# Stage 2 harness build artifacts (Harness/build.bat)
+Harness/*.exe
+Harness/*.obj

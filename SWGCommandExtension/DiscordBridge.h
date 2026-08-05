@@ -3,14 +3,26 @@
 #include <windows.h>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // ============================================================================
-// DiscordBridge — Stage 1 of the Discord chat bridge (game -> Discord).
+// DiscordBridge — the extension side of the Discord chat bridge.
 //
-// Guild chat lines captured by SwgCuiChatWindowTab::appendText are cleaned,
-// queued, and POSTed in ~1.5 s batches to the GalaxyExtender relay, which
-// de-duplicates across guild members and forwards a single copy to Discord.
-// The extension never talks to Discord and never sees the webhook URL.
+// Stage 1 (game -> Discord): guild chat lines captured by
+// SwgCuiChatWindowTab::appendText are cleaned, queued, and POSTed in ~1.5 s
+// batches to the GalaxyExtender relay, which de-duplicates across guild
+// members and forwards a single copy to Discord. The extension never talks to
+// Discord and never sees the webhook URL.
+//
+// Stage 2 (Discord -> game): the worker polls GET /messages — a per-message
+// claim work queue, NOT a broadcast feed (Relay/README.md) — and the frame
+// tick injects each claimed message into the real guild room as
+// "[Discord] <author>: <text>" through the game's own chat pipeline
+// (CuiChatParser::injectRoom), paced at ~1 line/s. The injected line coming
+// back through the Stage 1 capture is the relay's delivery ack; the relay
+// never forwards marked lines to Discord, so nothing loops. Polling only
+// happens while a claim could actually be honoured: room id cached, frame
+// tick fresh (in the ground scene), and the incoming queue drained.
 //
 // Configuration lives in DiscordBridge.ini beside the DLL (git-ignored — it
 // holds the relay key):
@@ -27,6 +39,9 @@
 //                             ; must be a plain non-negative number
 //   allow_http=0              ; http:// endpoints are refused unless set to 1
 //                             ; (the key would travel in cleartext)
+//   stage2=1                  ; set to 0 to opt this client out of polling /
+//                             ; injecting Discord messages (Stage 1 relaying
+//                             ; and the display rewrite are unaffected)
 //
 // Threading: everything in the hook path runs on the game's main thread and
 // must never block — clean, enqueue, return. All HTTP happens on the worker
@@ -62,12 +77,39 @@ public:
 	// caller always runs the original.
 	static void onChatAppend(const void* tab, const void* channelId, const void* chatString);
 
+	// From the same hook, after onChatAppend: if the line is a bridged Discord
+	// message ("Sender: [Discord] ..." on the guild channel), produce a display
+	// copy with the injecting player's sender-name prefix stripped. Returns
+	// false (out untouched) for every other line. The capture above always
+	// relays the ORIGINAL line — the relay's ack matching depends on it; only
+	// what the local player sees is rewritten.
+	static bool maybeRewriteForDisplay(const void* channelId, const void* chatString, std::wstring& out);
+
 	// --- /emu discord ---
 	static bool isEnabled();
 	static void setEnabled(bool value);   // 'on' also reloads config + clears the 401 latch
 	static void enqueueTestLine();
+	static void requestPollNow();         // /emu discord poll — also clears the poll fault latch
 	static void appendStatus(std::string& out);        // never includes the key
 	static void appendChannelTypes(std::string& out);  // CT_guild verification aid
+
+	// --- Stage 2 pieces exported for the test harness ---
+	struct IncomingDiscordMessage {
+		std::string id;       // Discord snowflake, opaque here
+		std::string author;   // relay-sanitized, ≤ 32 chars
+		std::string text;     // relay-sanitized, ≤ 200 chars, UTF-8
+	};
+
+	// Parses the GET /messages response body. Strict enough to reject
+	// truncated or malformed JSON (false), tolerant of unknown fields.
+	static bool parseMessagesResponse(const std::string& body,
+		std::vector<IncomingDiscordMessage>& outMessages, long long& outDropped);
+
+	// The display-rewrite core: given a raw chat line (SWG escapes intact),
+	// strips the sender-name prefix in front of a "[Discord] " marker.
+	// "[GuildChat] Kaelen: [Discord] Bob: hi" -> "[GuildChat] [Discord] Bob: hi".
+	// Returns false (out untouched) when the line does not match.
+	static bool rewriteMarkedLine(const wchar_t* in, size_t length, std::wstring& out);
 
 	// --- text helpers (exported for reuse/diagnostics) ---
 	// Strips SWG escapes (\#RRGGBB, \#., \>NNN), maps control characters to
