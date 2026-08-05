@@ -1,7 +1,7 @@
 # Discord Chat Bridge — Stage 2 (Discord → game) Investigation Plan
 
-Status: **S1/S2 spike COMPLETE; R1 claim contract pinned and stub shipped; S4 answered (2026-08-05).** Send path confirmed end-to-end (injected line visible in guild chat, seen by a second player, relayed to Discord). `GET /api/v1/messages` now exists on the relay with the pinned consume contract (empty + `X-Relay-Stage2: disabled` until R3); Core3 constraints recorded under "S4 findings". Next: extension poll/inject path against the stub. **Decision made: Model B — Discord messages are injected into the real guild room** so every guild member sees them, extension or not. Messages carry a `[Discord]` text marker; marked lines are never forwarded back to Discord.
-Last updated: 2026-08-05
+Status: **Extension poll/inject path BUILT and harness-tested (2026-08-06).** S1/S2 spike complete; R1 claim contract pinned and stub shipped; S4 answered; R7 ack matching decided (exact first, then mask-tolerant). The extension now polls `/messages`, injects claimed messages paced at ~1.1 s via the confirmed `originalParse::run` path, and rewrites bridged lines for display — 56 harness checks green plus a live poll against the deployed stub (see "Extension build notes"). Next: **R3–R7** — the real relay read path (Discord fetch, echo filter, sanitizer, claim/ack store), then flip `X-Relay-Stage2` to `enabled`. **Decision made: Model B — Discord messages are injected into the real guild room** so every guild member sees them, extension or not. Messages carry a `[Discord]` text marker; marked lines are never forwarded back to Discord.
+Last updated: 2026-08-06
 
 Companion docs: [discord-bridge-plan.md](discord-bridge-plan.md) (Stage 1, as built), [discord-bridge-research.md](discord-bridge-research.md) (binary/source findings), [discord-relay-plan.md](discord-relay-plan.md) (relay).
 
@@ -95,11 +95,23 @@ The room-message path is client packet `ChatSendToRoom` → `ChatSendToRoomCallb
 
 ## Extension side (beyond the send path)
 
+✅ **All built 2026-08-06** — as planned below, plus build notes after the list.
+
 - Poll worker on the existing WinHTTP thread (or a second thread mirroring the Stage 1 worker): `GET /messages`, same `X-Relay-Key`, backoff on 429/5xx exactly as Stage 1.
 - Receive-side display rewrite (see "Injector-name display" above): in the `Tab::appendText` hook, strip the injector-name prefix from marked lines before calling the original — capture/relay the untouched line first.
 - Locked incoming queue → frame-tick drain → `originalParse::run` (S5), paced (S6). Decide what happens to claimed messages while zoning/not in ground scene: the frame tick doesn't fire, injection stalls, claims expire, another client picks them up — which is the system working as intended; just don't poll (or don't claim) while the tick is stale.
 - `/emu discord status` additions: stage 2 on/off, pending queue depth, last poll result, last injection. `/emu discord off` drops the incoming queue too (mirror of the Stage 1 rule); unacked claims simply expire on the relay and are redelivered elsewhere.
 - Test harness first, like Stage 1: compile the poll/inject path standalone, feed it synthetic relay responses (empty, N messages, 429, 5xx, malformed), point it at the R1 stub, only then go in-game.
+
+### Extension build notes (2026-08-06)
+
+- **Where:** [DiscordBridge.h](../SWGCommandExtension/DiscordBridge.h)/[.cpp](../SWGCommandExtension/DiscordBridge.cpp) (poll step on the existing worker, claim queue, paced drain from `onFrame`, display rewrite, JSON reader), [CuiChatParser](../SWGCommandExtension/CuiChatParser.h) (`injectRoom`/`hasCachedRoomId` seam over the confirmed send path), `EmuCommandParser` (`/emu discord poll`, help/status text).
+- **Claim gates:** the worker polls only when Stage 2 is on (`stage2=1` ini key, default on), the incoming queue is empty, the frame tick is fresh (< 3 s — only ticks in the ground scene, so zoning stops claims) and a room id is cached. **Claim safety:** a message not injected within 45 s of receipt is let lapse locally (relay redelivers at 60 s; injecting near that line would race the next claimant and double-post).
+- **Poll cadence:** 5 s; 60 s while the relay reports `X-Relay-Stage2: disabled`; exponential backoff 10 s → 5 min on failures; 429 honours `Retry-After`; 401/403 latches the whole bridge (same as Stage 1); **400/404 latch a Stage 2-only fault** (Stage 1 keeps relaying) cleared by `/emu discord on` or `/emu discord poll`.
+- **Display rewrite** (`rewriteMarkedLine`): strips a strict `Name: ` prefix (one colon, ≤ 48 chars, escape-tolerant, optional `[Tag] `) only when directly followed by `[Discord] `; anything else — marker mid-sentence, second colon, marker at line start — is left untouched. Capture/relay always sees the original line.
+- **Injection composition:** `[Discord] <author>: <text>` from relay-sanitized fields, defensively re-run through `cleanChatText` (same strip/clamp as capture) before `originalParse::run`.
+- **Harness:** [Harness/](../Harness/README.md) compiles the real `DiscordBridge.cpp` standalone (game seams stubbed). 56 checks green: JSON parser units (escapes, surrogate pairs, truncation), rewrite units, and a scripted-stub loop covering both claim gates, paced two-message injection, idle/429/500/malformed/dropped/disabled/404-fault/off-discards/401 — plus a **live-mode poll against the deployed relay stub** (real ini, HTTPS): `stage 2 disabled on the relay`, as expected until R3.
+- **Still needs one in-game session** once the relay side (R3+) exists: end-to-end Discord → guild room, the R7 profanity-filter length-preservation check (type a filtered word, compare captured length), and redelivery-on-kill.
 
 ## Bot setup checklist (R2, manual steps)
 
@@ -131,8 +143,8 @@ Pass = each returned message has a non-empty `content` field, and webhook-posted
 
 1. **S1/S2 spike** ✅ **Done 2026-08-05** — send mechanism confirmed end-to-end (see "S1/S2 spike findings"); guild room id comes from the parse-hook cache, filled by any line typed in the guild tab.
 2. **R1** ✅ **Done 2026-08-05** — claim contract pinned in Relay/README.md, stub live on the relay (77 tests). S4 limits read from the local Core3 source the same session (see "S4 findings").
-3. Extension poll/inject path against the stub, harness-tested.
-4. **R2** — bot + REST content verification.
+3. **Extension poll/inject path against the stub, harness-tested** ✅ **Done 2026-08-06** — see "Extension build notes".
+4. **R2** — bot + REST content verification. ✅ **Done 2026-08-05.**
 5. **R3–R7** — real relay read path + sanitizer + claim/ack store, behind the pinned contract; flip `X-Relay-Stage2` to enabled.
 6. **R8/R9** — load sanity, webhook retirement.
 7. End-to-end: type in Discord → line appears in guild chat for a non-extension player too → confirm it does **not** echo back to Discord → kill the injecting client mid-stream and watch redelivery pick another injector.
