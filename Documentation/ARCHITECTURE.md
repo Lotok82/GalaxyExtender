@@ -61,6 +61,8 @@ SWGCommandExtension/
 ├── EmuCommandParser.h / .cpp     # All /emu subcommands (graphics overrides, diagnostics, food/drink, hover height)
 ├── FoodDrinkMonitor.h / .cpp     # Memory scanner tools + net status UI updater
 ├── CustomizationData.h           # VehicleHoverDynamics wrapper (direct memory access to hover parameters)
+├── DiscordBridge.h / .cpp        # Guild chat -> relay (ini config, WinHTTP worker thread, batching)
+├── SwgCuiChatWindowTab.h         # Chat capture hook (Tab::appendText) + ChannelId type read
 │
 │   ── Mediator / UI System ──
 ├── CuiMediator.h                # UI mediator wrapper (get/create, fetch/release, isActive)
@@ -200,8 +202,8 @@ The project reimplements SOE's custom STL-like types because the client uses its
 | `0x00b32850` | `CustomizationData::findConstVariable(const std::string&)` |
 | `0x00b33510` | `CustomizationData::registerModificationListener()` |
 | | |
-| **Discord Chat Bridge** (not yet hooked — see [discord-bridge-plan.md](discord-bridge-plan.md)) | |
-| `0x0102DA80` | `SwgCuiChatWindow::Tab::appendText(const ChannelId&, const Unicode::String&)` — `__thiscall`, `this` = Tab. Chat choke point; every line reaching any tab passes through it |
+| **Discord Chat Bridge** (see [discord-bridge-plan.md](discord-bridge-plan.md)) | |
+| `0x0102DA80` | `SwgCuiChatWindow::Tab::appendText(const ChannelId&, const Unicode::String&)` — `__thiscall`, `this` = Tab. Chat choke point; every line reaching any tab passes through it. **Hooked** by `SwgCuiChatWindowTab.h` |
 | `0x0102D2D0` | `SwgCuiChatWindow::Tab::hasChannel(const ChannelId&)` |
 | `0x00F364B0` | `SwgCuiChatWindow` constructor (already used by `SwgCuiChatWindow.h`) |
 
@@ -389,3 +391,53 @@ See [vehicle-hover-research.md](vehicle-hover-research.md) for full technical de
 | `/emu hover <value>` | Set hover height (float, game units) |
 | `/emu hover reset` | Restore original height |
 | `/emu hover debug` | Dump mount object hierarchy for debugging |
+
+---
+
+## Discord Chat Bridge (Stage 1)
+
+Relays guild chat to Discord via the de-duplicating relay in [`Relay/`](../Relay/README.md).
+Design and status: [discord-bridge-plan.md](discord-bridge-plan.md); binary research:
+[discord-bridge-research.md](discord-bridge-research.md). User docs: [README](../README.md).
+
+### Shape
+
+```
+Tab::appendText hook (main thread)          DiscordBridge worker (WinHTTP)
+  ChannelId.type == guild?                    every ~1.5 s:
+  strip \#RRGGBB / \#. / \>NNN                  take <=50 lines, <=30 KB
+  clamp to 512 chars, UTF-16 -> UTF-8           POST <endpoint>/api/v1/chat
+  collapse (text, frame, <200 ms) duplicates    X-Relay-Key header
+  occurrence = matches in last 60 s + 1         2xx clear / 401 latch off
+  enqueue                                       429 Retry-After / 5xx same batchId
+  always call the original                      400 log + drop
+```
+
+### Conventions worth knowing before touching it
+
+- **Nothing blocks in the hook.** It runs on the game's main thread for every chat line in
+  every tab. All networking is on the worker thread.
+- **Client memory reads are SEH-guarded** (`seh_readChannelType`, `seh_copyChatText`), as in
+  `FoodDrinkMonitor.cpp` — the functions are POD-only because MSVC forbids `__try` alongside
+  objects needing unwinding.
+- **`Unicode::String` is the SOE container**, `{begin, end, endOfStorage}` — the same layout
+  `soe::unicode` models. The hook reads those two pointers rather than calling into the
+  client, per the old-MSVC ABI rule.
+- **The queue, config and send state are the only shared state** (`CRITICAL_SECTION`). The
+  frame counter, occurrence history, dedupe slot and observed-channel table are main-thread
+  only and deliberately unguarded.
+- **Text cleaning is correctness-critical, not cosmetic.** Two clients must produce
+  byte-identical text for the same line or the relay's dedupe hash misses and every player's
+  copy posts separately. Keep every transformation deterministic.
+- **`DiscordBridge.ini` holds a live credential** and is git-ignored. `status` prints the
+  relay host only, never the key.
+
+### Chat Commands
+
+| Command | Description |
+|---------|-------------|
+| `/emu discord on` | Enable relaying; re-reads the ini and clears the 401 latch |
+| `/emu discord off` | Disable relaying, discard the queue |
+| `/emu discord status` | State, relay host, queue depth, last HTTP result |
+| `/emu discord test` | Enqueue a synthetic line (exercises the strip path) |
+| `/emu discord types` | Observed `ChannelId.type` values with sample lines |

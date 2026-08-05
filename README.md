@@ -66,6 +66,46 @@ Adjust the hover height of jetpacks, speeders, and other hover vehicles while mo
 | `/emu hover <value>` | Set hover height in game units (e.g. `5.0` for high, `0.2` for low) |
 | `/emu hover reset` | Restore the original hover height |
 
+### Discord Guild Chat Bridge
+
+Relays your guild chat to a Discord channel. Lines are sent to the GalaxyExtender relay,
+which de-duplicates them across everyone running the bridge and forwards a single copy to
+Discord — so it is safe (and useful, for resilience) for several guild members to enable it.
+
+Guild chat has to be visible in at least one chat tab for the bridge to see it. The default
+UI qualifies.
+
+**Setup.** Create `DiscordBridge.ini` next to `SWGCommandExtension.dll` and ask the relay
+operator for the key. The file is git-ignored — never commit it or paste the key anywhere.
+
+```ini
+[DiscordBridge]
+enabled=1
+endpoint=https://<relay-host>/relay
+key=<X-Relay-Key from the relay operator>
+
+; all optional — labels for the relay's logs only
+client_id=kaelen
+character=Kaelen
+galaxy=Basilisk
+
+; optional escape hatch: which chat channel counts as guild (default 9)
+channel_type=9
+```
+
+Without the file the bridge stays inactive and says why in `/emu discord status`.
+
+| Command | Description |
+|---------|-------------|
+| `/emu discord on` | Start relaying. Also re-reads `DiscordBridge.ini`, so a corrected endpoint or key takes effect without restarting the client |
+| `/emu discord off` | Stop relaying and discard anything queued |
+| `/emu discord status` | State, relay host, queue depth and the last HTTP result. Never prints the key |
+| `/emu discord test` | Queue a synthetic line to check the round trip |
+| `/emu discord types` | Chat channel types seen so far — use this to confirm which one carries guild chat |
+
+If the relay rejects your key the bridge stops rather than retrying; `status` says so. Fix
+`key` in the ini and run `/emu discord on`.
+
 ### Other
 
 | Command | Description |

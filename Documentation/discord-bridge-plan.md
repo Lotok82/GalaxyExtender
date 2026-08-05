@@ -1,15 +1,38 @@
 # Discord Chat Bridge — Plan
 
-Status: **relay is built and live; extension side not started — this is the next piece of work.**
+Status: **Stage 1 extension side is built and verified in-game. Relay Phases 2–5 (de-duplication + Discord forwarding) are implemented and tested — guild chat reaches Discord as soon as the relay is redeployed.** See [discord-relay-plan.md](discord-relay-plan.md) "Next actions".
 Last updated: 2026-08-05
 
 ## Start here (handoff)
 
-**What exists:** the relay. Built, tested, deployed and verified against the live host — see [discord-relay-plan.md](discord-relay-plan.md) and [../Relay/README.md](../Relay/README.md). Commits `da8bf3c` (scaffold) and `eeb1ac8` (fixes + host verification) on branch `GuildChat`.
+**What exists:** the relay (built, deployed, verified against the live host — see [discord-relay-plan.md](discord-relay-plan.md) and [../Relay/README.md](../Relay/README.md)) **and the Stage 1 extension side** — `DiscordBridge.h/.cpp`, the `SwgCuiChatWindowTab` hook, `/emu discord`, and the `dllmain`/`GroundScene` wiring. Both build clean (Debug and Release, Win32/x86).
 
-**What does not exist:** any extension-side code. No `DiscordBridge.*`, no chat hook, no `/emu discord` command. Nothing in the C++ project has been touched for this feature.
+**What is verified, and how.** The bridge's own translation unit was compiled into a test harness that feeds synthetic `appendText` calls through the real code path (only the Detours hook itself is stubbed out), pointed first at a locally-run copy of the relay, then at a raw TCP stub that returns chosen status codes, then at the live relay:
 
-**Relay state:** Phases 0–1 of 7 complete. **`POST /api/v1/chat` exists and works** — it authenticates, validates the full contract and returns accept counts. It does not de-duplicate (Phase 2) or forward to Discord (Phase 3) yet, and says so via the response header `X-Relay-Forwarding: disabled`. That is ideal for extension development: you get real 401/400/429/200 responses from the live relay, with nothing able to reach the Discord channel while you iterate.
+| Behaviour | Result |
+|---|---|
+| Batch shape, `POST <prefix>/api/v1/chat`, `X-Relay-Key` header | Accepted by the live relay's validator: `200 accepted=6 deduped=0` |
+| `occurrence` for a line repeated in three separate frames | `1`, `2`, `3` |
+| Same line twice in one frame (multi-tab case) | Collapsed to one relayed line |
+| `clientSeq` | Monotonic, no gaps |
+| 512-char line, 50-line batch, 32 KB body | Enforced client-side; a 900-char line arrived clamped to 512, a 120-line burst split into 50s |
+| Blank-after-cleaning line | Dropped before it could fail the batch |
+| `401` | One request, then latched off, queue cleared. Confirmed against the **live relay over TLS** with a deliberately wrong key |
+| `429` with `Retry-After: 7` | One request, then paused 7 s |
+| `500` then `200` | Retried with the **same `batchId`** |
+| `400` | Batch dropped, body logged, no retry, bridge stays on and sends the next batch |
+| `shutdown()` with the worker running | Returned cleanly |
+
+**In-game verification: ✅ done (2026-08-05).** The remaining assumptions were confirmed with a real client session against the live relay:
+
+- The Detours hook at `0x0102DA80` fires — chat lines are captured (137 console lines, plus types 1/5/9 observed).
+- Guild chat **is** `ChannelId.type == 9`; `/emu discord types` flagged it `<- relayed` with a genuine guild line as the sample. No `channel_type` override needed.
+- Sample format matched expectations after cleaning: `[GuildChat] lotok: <text>` — prefix present, escapes stripped.
+- End-to-end send worked: `last result: 200 accepted=1 deduped=0`, 4 lines accepted in 4 batches, 0 dropped, worker running, frame counter ticking.
+
+Reminder for anyone repeating the test: **no message appears in Discord at this stage** — the live relay is Phase 1 and does not forward (`X-Relay-Forwarding: disabled`). A `200 accepted=N` in `/emu discord status` (or the batch in the relay's `App_Data/logs`) is the success signal until Phase 3 ships.
+
+**Relay state:** Phases 0–1 of 7 complete. **`POST /api/v1/chat` exists and works** — it authenticates, validates the full contract and returns accept counts. It does not de-duplicate (Phase 2) or forward to Discord (Phase 3) yet, and says so via the response header `X-Relay-Forwarding: disabled`. `deduped` is therefore always 0 for now; that is not a bug.
 
 **Two corrections to be aware of if reading this plan cold** — the detail sections below have been updated, but the change is easy to miss:
 
@@ -41,7 +64,22 @@ Three options were assessed:
 
 **Decided (2026-08-05): relay first.** Option 2 is built before the extension ships, and the extension points at the relay from day one — webhook-direct mode is not shipped. This kills the duplicate problem immediately and makes Stage 2 a config change. Extension-side code is nearly identical either way — `DiscordBridge` batches lines and POSTs JSON to a configured HTTPS endpoint; only URL + payload shape differ. Relay lives in this repo under `Relay/` with its own solution, targets .NET 8 LTS, hosted on IIS shared hosting. See [discord-relay-plan.md](discord-relay-plan.md) for the full design — note it adds two small requirements to `DiscordBridge` (per-line `occurrence` counter, per-POST `batchId`).
 
-## Stage 1 implementation plan (branch `feature/discord-chat-bridge`)
+## Stage 1 implementation — as built (branch `GuildChat`)
+
+The plan below is what was implemented. Deviations and decisions taken during implementation:
+
+- **`/emu discord types`** was added beyond the planned four subcommands. The plan called for debug-logging `ChannelId.type` to verify `CT_guild`; a command that reports every observed type with a sample line makes that a one-step in-game check instead of a DebugView session, and `channel_type` in the ini lets a wrong guess be corrected without a rebuild.
+- **Character name is not read from the client.** There is no name accessor in the project and finding one is a fresh address hunt. `client.id` defaults to the sanitised machine name and `character`/`galaxy` come from the ini — all three are self-reported labels the relay uses only for logging, so nothing is lost.
+- **Local dedupe also compares a tick count** (same text AND same frame AND within 200 ms), not just `(text, frame)`. `GroundScene::parseMessages` only ticks in the ground scene, so a frozen frame counter would otherwise suppress genuine repeats indefinitely. Duplicate `appendText` calls for one message happen microseconds apart, so the extra condition never merges distinct messages.
+- **Initialisation is deferred out of `DllMain`.** `DiscordBridge::initialize` only creates the critical section and stores the module handle; the ini read and `CreateThread` happen on the first frame, because neither is safe under the loader lock.
+- **Shutdown waits on a "worker finished" event, not the thread handle.** Waiting for a thread to *exit* inside `DllMain` deadlocks on the loader lock via `DLL_THREAD_DETACH`. On process exit (`lpReserved != nullptr`) the worker has already been terminated — possibly mid-hold on the bridge lock — so shutdown touches nothing at all: no lock, no waits, no frees. On `FreeLibrary` the hook is detached *before* the bridge tears down, so no new chat line can enter it. If the bounded 2 s wait ever expires, resources are deliberately leaked rather than freed under a still-running worker.
+- **Text cleaning maps control characters to spaces** rather than deleting them. Either is fine for Discord; what matters is that it is deterministic, since two clients must produce byte-identical text or the relay's dedupe hash misses.
+- Retries are capped at 6 attempts, the outbound queue at 500 lines (oldest dropped), so a relay outage cannot grow memory without bound or wedge the queue forever. Only transport errors and 5xx count toward the attempt cap — a 429 is the relay pacing us, not a failure. Server-supplied backoff (`Retry-After`, `retryAfterMs`) is capped at 15 minutes so a misbehaving response cannot silently pause the bridge for hours.
+- **`/emu discord off` discards the in-flight batch too**, not just the queue — the worker drops any batch it had already taken out of the queue, so nothing survives an off/on cycle.
+
+### Known caveat found during implementation
+
+**Profanity filtering breaks cross-client dedupe.** Guild lines are built by `colorAndFilterText(text, TT_guild, profanityFiltered)`, so a relaying client with the filter on sends `****` where one with it off sends the word. The relay sees two different strings and posts both. Nothing can be done client-side; it only affects lines containing filtered words, and only when relaying members' filter settings differ.
 
 1. **`DiscordBridge.h/.cpp`** (new):
    - Config from `DiscordBridge.ini` beside the DLL (git-ignored — already added to `.gitignore`):
@@ -58,12 +96,12 @@ Three options were assessed:
    - Filter: `ChannelId.type` (int at arg1 + 0x0) `== CT_guild` (9 — verify at runtime, see below).
    - **Local dedupe**: same guild message is appended once per tab/window that shows the guild channel, all within one dispatch. Keep `(last relayed string, frame counter)` — frame counter incremented by the existing `GroundScene::parseMessages` hook — and skip identical string in the same frame. Genuine repeats arrive in later frames and still relay.
    - Clean + enqueue, then always run the original.
-3. **`EmuCommandParser.cpp`**: `/emu discord on|off|status|test` + help text (no `capture` — not needed for guild).
-4. **`dllmain.cpp`**: `ATTACH_HOOK`/`DETACH_HOOK` for the tab hook; bridge init/shutdown.
-5. **Dev-time verifications** (first run):
-   - Confirm `CT_guild == 9` in our diverged binary (debug-log `ChannelId.type` while guild chat flows).
-   - Confirm guild line formatting matches expectations (`prefix + Name\>032: text + \>000`, colour escapes embedded, no timestamp at hook time).
-6. **Docs**: README user-facing command docs. ✅ `ARCHITECTURE.md` address table and `DiscordBridge.ini` in `.gitignore` are both done.
+3. **`EmuCommandParser.cpp`**: `/emu discord on|off|status|test` + help text (no `capture` — not needed for guild). Shipped with `types` as well.
+4. **`dllmain.cpp`**: `ATTACH_HOOK`/`DETACH_HOOK` for the tab hook; bridge init/shutdown. The frame tick is added in `GroundScene::parseMessages`.
+5. **Dev-time verifications** (first run) — ✅ **done 2026-08-05**, see "Start here":
+   - Confirmed `CT_guild == 9` in our diverged binary via `/emu discord types` in a live session.
+   - Confirmed guild line formatting (`[GuildChat] name: text` after cleaning) from the sample `types` printed.
+6. **Docs**: ✅ README user-facing command docs and ini template, `ARCHITECTURE.md` address table, `DiscordBridge.ini` in `.gitignore`.
 
 ## Relay contract obligations
 
@@ -90,6 +128,7 @@ POST <endpoint>/api/v1/chat        Header: X-Relay-Key: <key>
 - The hook only sees text that reaches a chat tab → the relaying player must have the guild channel in at least one tab (default UI includes it).
 - ~~Webhook-direct duplicate problem~~ — resolved by the relay; central de-duplication means multiple relaying members are harmless.
 - Local per-frame dedupe is still needed (item 2 above): one client with the guild channel in several tabs/windows produces several `appendText` calls for one message, within a single dispatch. That is a *client-side* duplicate the relay cannot distinguish from a genuine repeat, so it must be collapsed before `occurrence` is computed.
+- Guild lines pass through the client's profanity filter before our hook, so relaying members with different filter settings produce different text for the same message and the relay's dedupe misses it. See "Known caveat found during implementation" above.
 - ~~The webhook URL was shared in plaintext during planning~~ — regenerated 2026-08-05. It now lives only in the relay's git-ignored `appsettings.Production.json` on the host; the extension never sees it.
 
 ## Stage 2 sketch (separate PR)

@@ -1,0 +1,1516 @@
+#include "stdafx.h"
+
+#include "DiscordBridge.h"
+#include "SwgCuiChatWindowTab.h"
+#include "soewrappers.h"
+
+#include <winhttp.h>
+#include <rpc.h>
+#include <stdio.h>
+#include <deque>
+#include <vector>
+
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "rpcrt4.lib")
+
+// ============================================================================
+// Limits. The first three mirror the relay's own validation (Relay/README.md)
+// and are enforced here because a violation rejects the *entire* batch.
+// ============================================================================
+
+namespace {
+
+const size_t MAX_LINE_CHARS = 512;        // relay MaxLineLength, UTF-16 units
+const size_t MAX_LINES_PER_BATCH = 50;    // relay MaxLinesPerBatch
+const size_t MAX_BODY_BYTES = 32768;      // relay body cap
+const size_t MAX_LINES_JSON_BYTES = 30000; // leaves room for the envelope
+const size_t LINE_JSON_OVERHEAD = 64;     // per-line field names and numbers
+
+const size_t MAX_QUEUE_LINES = 500;       // outbound backlog cap (oldest dropped)
+const size_t MAX_HISTORY_LINES = 500;     // occurrence-window cap
+const size_t MAX_OBSERVED_TYPES = 24;     // diagnostics table cap
+const size_t MAX_RAW_CHAT_CHARS = 2048;   // stack buffer for one appendText call
+
+const ULONGLONG OCCURRENCE_WINDOW_MS = 60000; // relay's occurrence definition
+const DWORD BATCH_INTERVAL_MS = 1500;
+const DWORD DEDUPE_WINDOW_MS = 200;       // see localDuplicate()
+const DWORD WORKER_JOIN_TIMEOUT_MS = 2000;
+const int MAX_BATCH_ATTEMPTS = 6;         // 5xx/timeout retries before dropping
+const size_t MAX_RESPONSE_BYTES = 4096;
+
+// Server-supplied backoff (Retry-After, retryAfterMs) is capped so a misbehaving
+// response cannot silently pause the bridge for hours. A real overload clears in
+// minutes; anything longer should stay visible and recoverable via /emu discord.
+const int MAX_RETRY_AFTER_SECONDS = 900;
+
+// ============================================================================
+// State
+// ============================================================================
+
+struct Config {
+	bool enabled;
+	int channelType;
+	bool https;
+	INTERNET_PORT port;
+	std::wstring host;
+	std::wstring path;      // "<ini path prefix>/api/v1/chat"
+	std::wstring key;       // never logged, never echoed to chat
+	std::string clientId;
+	std::string character;
+	std::string galaxy;
+	bool valid;
+	std::string error;      // why !valid, shown by /emu discord status
+
+	Config()
+		: enabled(false), channelType(ChatChannelId::CT_guild_default), https(true),
+		  port(INTERNET_DEFAULT_HTTPS_PORT), valid(false) {
+	}
+};
+
+struct QueuedLine {
+	std::string text;       // UTF-8, cleaned and clamped
+	int occurrence;
+	long long clientSeq;
+};
+
+struct HistoryEntry {
+	ULONGLONG tick;
+	std::string text;
+};
+
+struct ObservedChannel {
+	int type;
+	unsigned long count;
+	std::string sample;     // first line seen on this channel, for identification
+};
+
+CRITICAL_SECTION s_lock;
+bool s_lockReady = false;
+HMODULE s_module = nullptr;
+bool s_initialized = false;
+
+// --- guarded by s_lock ---
+Config s_config;
+unsigned long s_configGeneration = 0;
+std::deque<QueuedLine> s_queue;
+ULONGLONG s_nextSendTick = 0;
+std::string s_lastResult;
+ULONGLONG s_lastResultTick = 0;
+unsigned long s_batchesAccepted = 0;
+unsigned long s_linesAccepted = 0;
+unsigned long s_linesDropped = 0;
+bool s_stopping = false;
+HANDLE s_worker = nullptr;
+HANDLE s_stopEvent = nullptr;
+HANDLE s_doneEvent = nullptr;
+
+// --- main thread only ---
+unsigned long long s_frameCounter = 0;
+long long s_clientSeq = 0;
+std::deque<HistoryEntry> s_history;
+std::vector<ObservedChannel> s_observed;
+std::string s_lastRelayedText;
+unsigned long long s_lastRelayedFrame = 0;
+ULONGLONG s_lastRelayedTick = 0;
+
+// --- cross-thread flags ---
+volatile LONG s_authFailed = 0;   // 401 latch: bad key, retrying cannot help
+
+void logLine(const char* format, ...) {
+	char message[1024];
+	va_list args;
+	va_start(args, format);
+	_vsnprintf_s(message, sizeof(message), _TRUNCATE, format, args);
+	va_end(args);
+
+	char out[1100];
+	sprintf_s(out, sizeof(out), "[DiscordBridge] %s\n", message);
+	OutputDebugStringA(out);
+}
+
+// ============================================================================
+// SEH helpers — POD only. MSVC forbids __try in functions holding C++ objects
+// that need unwinding, so client-memory reads live in their own functions.
+// ============================================================================
+
+bool seh_readChannelType(const void* channelId, int& outType) {
+	__try {
+		outType = *reinterpret_cast<const int*>(channelId);
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
+// Unicode::String is the client's SOE container: {begin, end, endOfStorage}.
+// Confirmed by the appendText disassembly (`mov eax,[edi]` / `cmp eax,[edi+4]`
+// as the empty check) and by soe::unicode working against other client calls.
+bool seh_copyChatText(const void* chatString, wchar_t* dest, size_t destChars, size_t& outLength) {
+	__try {
+		const wchar_t* const* fields = reinterpret_cast<const wchar_t* const*>(chatString);
+		const wchar_t* begin = fields[0];
+		const wchar_t* end = fields[1];
+
+		if (begin == nullptr || end == nullptr || end < begin)
+			return false;
+
+		size_t length = static_cast<size_t>(end - begin);
+
+		if (length > destChars)
+			length = destChars;
+
+		memcpy(dest, begin, length * sizeof(wchar_t));
+		outLength = length;
+
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
+// ============================================================================
+// Small string helpers
+// ============================================================================
+
+bool isHexDigit(wchar_t c) {
+	return (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
+}
+
+bool isDigit(wchar_t c) {
+	return c >= L'0' && c <= L'9';
+}
+
+void trimWide(std::wstring& text) {
+	size_t begin = 0;
+	size_t end = text.size();
+
+	while (begin < end && (text[begin] == L' ' || text[begin] == L'\t'))
+		++begin;
+	while (end > begin && (text[end - 1] == L' ' || text[end - 1] == L'\t'))
+		--end;
+
+	if (begin != 0 || end != text.size())
+		text = text.substr(begin, end - begin);
+}
+
+void trimNarrow(std::string& text) {
+	size_t begin = 0;
+	size_t end = text.size();
+
+	while (begin < end && (text[begin] == ' ' || text[begin] == '\t'))
+		++begin;
+	while (end > begin && (text[end - 1] == ' ' || text[end - 1] == '\t'))
+		--end;
+
+	if (begin != 0 || end != text.size())
+		text = text.substr(begin, end - begin);
+}
+
+std::string narrowLossy(const std::wstring& text) {
+	std::string out;
+	out.reserve(text.size());
+
+	for (size_t i = 0; i < text.size(); ++i) {
+		wchar_t c = text[i];
+		out.push_back((c >= 0x20 && c < 0x7F) ? static_cast<char>(c) : '?');
+	}
+
+	return out;
+}
+
+void appendJsonString(std::string& out, const std::string& value) {
+	out.push_back('"');
+
+	for (size_t i = 0; i < value.size(); ++i) {
+		unsigned char c = static_cast<unsigned char>(value[i]);
+
+		switch (c) {
+		case '"':  out += "\\\""; break;
+		case '\\': out += "\\\\"; break;
+		case '\b': out += "\\b"; break;
+		case '\f': out += "\\f"; break;
+		case '\n': out += "\\n"; break;
+		case '\r': out += "\\r"; break;
+		case '\t': out += "\\t"; break;
+		default:
+			if (c < 0x20) {
+				char escape[8];
+				sprintf_s(escape, sizeof(escape), "\\u%04x", c);
+				out += escape;
+			} else {
+				out.push_back(static_cast<char>(c));
+			}
+			break;
+		}
+	}
+
+	out.push_back('"');
+}
+
+void appendInt(std::string& out, long long value) {
+	char buffer[32];
+	sprintf_s(buffer, sizeof(buffer), "%lld", value);
+	out += buffer;
+}
+
+// Minimal scraper for the relay's flat response object — diagnostics only.
+long long jsonNumber(const std::string& body, const char* name, long long fallback) {
+	std::string needle = "\"";
+	needle += name;
+	needle += "\"";
+
+	size_t at = body.find(needle);
+	if (at == std::string::npos)
+		return fallback;
+
+	at = body.find(':', at + needle.size());
+	if (at == std::string::npos)
+		return fallback;
+
+	++at;
+	while (at < body.size() && (body[at] == ' ' || body[at] == '\t'))
+		++at;
+
+	bool negative = false;
+	if (at < body.size() && body[at] == '-') {
+		negative = true;
+		++at;
+	}
+
+	if (at >= body.size() || body[at] < '0' || body[at] > '9')
+		return fallback;
+
+	long long value = 0;
+	while (at < body.size() && body[at] >= '0' && body[at] <= '9') {
+		value = value * 10 + (body[at] - '0');
+		++at;
+	}
+
+	return negative ? -value : value;
+}
+
+std::string newBatchId() {
+	UUID uuid;
+	RPC_STATUS status = UuidCreate(&uuid);
+
+	char buffer[48];
+
+	if (status == RPC_S_OK || status == RPC_S_UUID_LOCAL_ONLY) {
+		sprintf_s(buffer, sizeof(buffer),
+			"%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+			static_cast<unsigned long>(uuid.Data1),
+			static_cast<unsigned>(uuid.Data2), static_cast<unsigned>(uuid.Data3),
+			uuid.Data4[0], uuid.Data4[1], uuid.Data4[2], uuid.Data4[3],
+			uuid.Data4[4], uuid.Data4[5], uuid.Data4[6], uuid.Data4[7]);
+	} else {
+		// Must still parse as a GUID or the relay rejects the batch outright.
+		static unsigned long counter = 0;
+		ULONGLONG tick = GetTickCount64();
+		++counter;
+		sprintf_s(buffer, sizeof(buffer),
+			"%08lx-%04lx-4000-8000-%012llx",
+			static_cast<unsigned long>(GetCurrentProcessId()),
+			counter & 0xFFFF, tick & 0xFFFFFFFFFFFFULL);
+	}
+
+	return std::string(buffer);
+}
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+std::wstring iniPath() {
+	wchar_t buffer[MAX_PATH];
+	buffer[0] = 0;
+
+	DWORD written = GetModuleFileNameW(s_module, buffer, MAX_PATH);
+	if (written == 0 || written >= MAX_PATH)
+		return std::wstring();
+
+	wchar_t* lastSlash = wcsrchr(buffer, L'\\');
+	if (lastSlash == nullptr)
+		return std::wstring();
+
+	lastSlash[1] = 0;
+
+	std::wstring path(buffer);
+	path += L"DiscordBridge.ini";
+
+	return path;
+}
+
+std::wstring readIniValue(const std::wstring& path, const wchar_t* key, const wchar_t* fallback) {
+	wchar_t buffer[1024];
+	buffer[0] = 0;
+
+	DWORD length = GetPrivateProfileStringW(L"DiscordBridge", key, fallback,
+		buffer, static_cast<DWORD>(_countof(buffer)), path.c_str());
+
+	std::wstring value(buffer, length);
+	trimWide(value);
+
+	return value;
+}
+
+// Accepts "https://host/relay", with or without a trailing slash, and tolerates
+// the full chat URL being pasted in. The relay is an IIS application in a
+// subfolder, so the path prefix matters.
+bool parseEndpoint(const std::wstring& endpoint, Config& config) {
+	URL_COMPONENTS components;
+	memset(&components, 0, sizeof(components));
+
+	wchar_t host[256];
+	wchar_t urlPath[1024];
+	host[0] = 0;
+	urlPath[0] = 0;
+
+	components.dwStructSize = sizeof(components);
+	components.lpszHostName = host;
+	components.dwHostNameLength = static_cast<DWORD>(_countof(host));
+	components.lpszUrlPath = urlPath;
+	components.dwUrlPathLength = static_cast<DWORD>(_countof(urlPath));
+
+	if (!WinHttpCrackUrl(endpoint.c_str(), static_cast<DWORD>(endpoint.size()), 0, &components)) {
+		config.error = "endpoint is not a valid URL";
+		return false;
+	}
+
+	if (components.nScheme != INTERNET_SCHEME_HTTPS && components.nScheme != INTERNET_SCHEME_HTTP) {
+		config.error = "endpoint scheme must be http or https";
+		return false;
+	}
+
+	config.https = (components.nScheme == INTERNET_SCHEME_HTTPS);
+	config.port = components.nPort;
+	config.host = host;
+
+	std::wstring prefix(urlPath);
+
+	while (!prefix.empty() && prefix[prefix.size() - 1] == L'/')
+		prefix.erase(prefix.size() - 1);
+
+	const wchar_t* fullSuffix = L"/api/v1/chat";
+	const wchar_t* versionSuffix = L"/api/v1";
+	size_t fullLength = wcslen(fullSuffix);
+	size_t versionLength = wcslen(versionSuffix);
+
+	if (prefix.size() >= fullLength && prefix.compare(prefix.size() - fullLength, fullLength, fullSuffix) == 0)
+		prefix.erase(prefix.size() - fullLength);
+	else if (prefix.size() >= versionLength && prefix.compare(prefix.size() - versionLength, versionLength, versionSuffix) == 0)
+		prefix.erase(prefix.size() - versionLength);
+
+	config.path = prefix + fullSuffix;
+
+	if (config.host.empty()) {
+		config.error = "endpoint has no host";
+		return false;
+	}
+
+	return true;
+}
+
+std::string clampLabel(const std::wstring& value) {
+	std::string narrow = narrowLossy(value);
+
+	if (narrow.size() > 64)
+		narrow.resize(64);
+
+	trimNarrow(narrow);
+
+	return narrow;
+}
+
+std::string defaultClientId() {
+	char name[MAX_COMPUTERNAME_LENGTH + 1];
+	DWORD size = static_cast<DWORD>(_countof(name));
+
+	std::string id;
+
+	if (GetComputerNameA(name, &size) && size > 0) {
+		id.assign(name, size);
+	}
+
+	std::string sanitised;
+	for (size_t i = 0; i < id.size(); ++i) {
+		char c = id[i];
+		if ((c >= 'A' && c <= 'Z'))
+			c = static_cast<char>(c - 'A' + 'a');
+		if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
+			sanitised.push_back(c);
+	}
+
+	if (sanitised.empty())
+		sanitised = "unknown-client";
+
+	if (sanitised.size() > 64)
+		sanitised.resize(64);
+
+	return sanitised;
+}
+
+// Builds a fresh Config from the ini. Caller assigns it under the lock.
+Config loadConfigFromDisk() {
+	Config config;
+
+	std::wstring path = iniPath();
+
+	if (path.empty()) {
+		config.error = "could not locate the DLL directory";
+		return config;
+	}
+
+	if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+		config.error = "DiscordBridge.ini not found beside the DLL";
+		return config;
+	}
+
+	// GetPrivateProfileString caches file contents; flush so /emu discord on
+	// picks up edits made while the client was running.
+	WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
+
+	std::wstring endpoint = readIniValue(path, L"endpoint", L"");
+	std::wstring key = readIniValue(path, L"key", L"");
+	std::wstring enabled = readIniValue(path, L"enabled", L"1");
+	std::wstring clientId = readIniValue(path, L"client_id", L"");
+	std::wstring character = readIniValue(path, L"character", L"");
+	std::wstring galaxy = readIniValue(path, L"galaxy", L"");
+	std::wstring channelType = readIniValue(path, L"channel_type", L"");
+
+	config.enabled = !(enabled == L"0" || enabled == L"false" || enabled == L"no");
+
+	if (!channelType.empty()) {
+		int parsed = _wtoi(channelType.c_str());
+		if (parsed >= 0)
+			config.channelType = parsed;
+	}
+
+	config.clientId = clampLabel(clientId);
+	if (config.clientId.empty())
+		config.clientId = defaultClientId();
+
+	config.character = clampLabel(character);
+	config.galaxy = clampLabel(galaxy);
+
+	if (endpoint.empty()) {
+		config.error = "endpoint is not set in DiscordBridge.ini";
+		return config;
+	}
+
+	if (key.empty()) {
+		config.error = "key is not set in DiscordBridge.ini";
+		return config;
+	}
+
+	if (!parseEndpoint(endpoint, config))
+		return config;
+
+	config.key = key;
+	config.valid = true;
+
+	return config;
+}
+
+// ============================================================================
+// HTTP (worker thread)
+// ============================================================================
+
+struct HttpResult {
+	bool transportError;
+	DWORD lastError;
+	DWORD statusCode;
+	int retryAfterSeconds;
+	std::string body;
+
+	HttpResult() : transportError(true), lastError(0), statusCode(0), retryAfterSeconds(0) {
+	}
+};
+
+void closeHandleIfSet(HINTERNET& handle) {
+	if (handle != nullptr) {
+		WinHttpCloseHandle(handle);
+		handle = nullptr;
+	}
+}
+
+bool openConnection(const Config& config, HINTERNET& session, HINTERNET& connection) {
+	session = WinHttpOpen(L"GalaxyExtender-DiscordBridge/1.0",
+		WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+
+	if (session == nullptr) {
+		logLine("WinHttpOpen failed (%lu)", GetLastError());
+		return false;
+	}
+
+	WinHttpSetTimeouts(session, 5000, 5000, 5000, 8000);
+
+	if (config.https) {
+		DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+#ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+		protocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+#endif
+		WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+	}
+
+	connection = WinHttpConnect(session, config.host.c_str(), config.port, 0);
+
+	if (connection == nullptr) {
+		logLine("WinHttpConnect failed (%lu)", GetLastError());
+		closeHandleIfSet(session);
+		return false;
+	}
+
+	return true;
+}
+
+int parseRetryAfterSeconds(const std::wstring& value) {
+	if (value.empty())
+		return 0;
+
+	// Delta-seconds form. An HTTP-date is legal too; the relay sends seconds,
+	// so anything unparseable falls back to a conservative minute.
+	wchar_t* end = nullptr;
+	long seconds = wcstol(value.c_str(), &end, 10);
+
+	if (end != value.c_str() && seconds > 0)
+		return (seconds > MAX_RETRY_AFTER_SECONDS) ? MAX_RETRY_AFTER_SECONDS : static_cast<int>(seconds);
+
+	return (value[0] == L'0') ? 0 : 60;
+}
+
+HttpResult postBatch(HINTERNET connection, const Config& config, const std::string& body) {
+	HttpResult result;
+
+	HINTERNET request = WinHttpOpenRequest(connection, L"POST", config.path.c_str(), nullptr,
+		WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+		config.https ? WINHTTP_FLAG_SECURE : 0);
+
+	if (request == nullptr) {
+		result.lastError = GetLastError();
+		return result;
+	}
+
+	std::wstring headers = L"Content-Type: application/json; charset=utf-8\r\nX-Relay-Key: ";
+	headers += config.key;
+
+	BOOL sent = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(headers.size()),
+		const_cast<char*>(body.c_str()), static_cast<DWORD>(body.size()),
+		static_cast<DWORD>(body.size()), 0);
+
+	// Scrub the key from our copy as soon as it is on the wire.
+	SecureZeroMemory(&headers[0], headers.size() * sizeof(wchar_t));
+
+	if (!sent || !WinHttpReceiveResponse(request, nullptr)) {
+		result.lastError = GetLastError();
+		closeHandleIfSet(request);
+		return result;
+	}
+
+	DWORD statusCode = 0;
+	DWORD statusSize = sizeof(statusCode);
+
+	if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+			WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX)) {
+		result.lastError = GetLastError();
+		closeHandleIfSet(request);
+		return result;
+	}
+
+	result.transportError = false;
+	result.statusCode = statusCode;
+
+	wchar_t retryAfter[64];
+	DWORD retrySize = sizeof(retryAfter);
+
+	if (WinHttpQueryHeaders(request, WINHTTP_QUERY_RETRY_AFTER, WINHTTP_HEADER_NAME_BY_INDEX,
+			retryAfter, &retrySize, WINHTTP_NO_HEADER_INDEX)) {
+		result.retryAfterSeconds = parseRetryAfterSeconds(std::wstring(retryAfter));
+	}
+
+	for (;;) {
+		DWORD available = 0;
+
+		if (!WinHttpQueryDataAvailable(request, &available) || available == 0)
+			break;
+
+		if (result.body.size() >= MAX_RESPONSE_BYTES)
+			break;
+
+		if (available > MAX_RESPONSE_BYTES - result.body.size())
+			available = static_cast<DWORD>(MAX_RESPONSE_BYTES - result.body.size());
+
+		std::vector<char> chunk(available);
+		DWORD read = 0;
+
+		if (!WinHttpReadData(request, &chunk[0], available, &read) || read == 0)
+			break;
+
+		result.body.append(&chunk[0], read);
+	}
+
+	closeHandleIfSet(request);
+
+	return result;
+}
+
+std::string buildBody(const Config& config, const std::string& batchId,
+	const std::vector<QueuedLine>& lines) {
+
+	std::string body;
+	body.reserve(1024);
+
+	body += "{\"batchId\":";
+	appendJsonString(body, batchId);
+	body += ",\"client\":{\"id\":";
+	appendJsonString(body, config.clientId);
+
+	if (!config.character.empty()) {
+		body += ",\"character\":";
+		appendJsonString(body, config.character);
+	}
+
+	if (!config.galaxy.empty()) {
+		body += ",\"galaxy\":";
+		appendJsonString(body, config.galaxy);
+	}
+
+	body += "},\"lines\":[";
+
+	for (size_t i = 0; i < lines.size(); ++i) {
+		if (i != 0)
+			body.push_back(',');
+
+		body += "{\"text\":";
+		appendJsonString(body, lines[i].text);
+		body += ",\"occurrence\":";
+		appendInt(body, lines[i].occurrence);
+		body += ",\"clientSeq\":";
+		appendInt(body, lines[i].clientSeq);
+		body.push_back('}');
+	}
+
+	body += "]}";
+
+	return body;
+}
+
+void recordResult(const char* text) {
+	EnterCriticalSection(&s_lock);
+	s_lastResult = text;
+	s_lastResultTick = GetTickCount64();
+	LeaveCriticalSection(&s_lock);
+}
+
+DWORD WINAPI workerMain(LPVOID) {
+	HINTERNET session = nullptr;
+	HINTERNET connection = nullptr;
+	unsigned long connectionGeneration = 0;
+
+	std::string pendingBody;
+	std::string pendingBatchId;
+	size_t pendingLines = 0;
+	int attempts = 0;
+
+	for (;;) {
+		if (WaitForSingleObject(s_stopEvent, BATCH_INTERVAL_MS) == WAIT_OBJECT_0)
+			break;
+
+		if (InterlockedCompareExchange(&s_authFailed, 0, 0) != 0)
+			continue;
+
+		Config config;
+		unsigned long generation = 0;
+		std::vector<QueuedLine> lines;
+		ULONGLONG now = GetTickCount64();
+
+		EnterCriticalSection(&s_lock);
+
+		bool active = s_config.valid && s_config.enabled && !s_stopping;
+		bool ready = active && now >= s_nextSendTick;
+
+		// /emu discord off promises to discard everything queued. That includes
+		// the batch this thread had already taken out of the queue — without this
+		// it would survive the off/on cycle and be sent after all.
+		bool dropPending = !active && !pendingBody.empty();
+
+		if (dropPending)
+			s_linesDropped += static_cast<unsigned long>(pendingLines);
+
+		if (ready) {
+			config = s_config;
+			generation = s_configGeneration;
+
+			if (pendingBody.empty()) {
+				size_t bytes = 0;
+
+				while (lines.size() < MAX_LINES_PER_BATCH && !s_queue.empty()) {
+					const QueuedLine& front = s_queue.front();
+					// text.size() * 2 is the worst-case JSON-escaped length,
+					// since control characters are already stripped.
+					size_t projected = bytes + front.text.size() * 2 + LINE_JSON_OVERHEAD;
+
+					if (!lines.empty() && projected > MAX_LINES_JSON_BYTES)
+						break;
+
+					bytes = projected;
+					lines.push_back(front);
+					s_queue.pop_front();
+				}
+			}
+		}
+
+		LeaveCriticalSection(&s_lock);
+
+		if (dropPending) {
+			pendingBody.clear();
+			pendingLines = 0;
+			attempts = 0;
+		}
+
+		if (!ready)
+			continue;
+
+		if (pendingBody.empty()) {
+			if (lines.empty())
+				continue;
+
+			pendingBatchId = newBatchId();
+			pendingBody = buildBody(config, pendingBatchId, lines);
+			pendingLines = lines.size();
+			attempts = 0;
+
+			if (pendingBody.size() > MAX_BODY_BYTES) {
+				// Cannot happen with the estimate above; drop rather than
+				// hand the relay something it will reject.
+				logLine("dropping oversize batch (%u bytes, %u lines)",
+					static_cast<unsigned>(pendingBody.size()), static_cast<unsigned>(pendingLines));
+				recordResult("batch dropped: body over 32 KB");
+
+				EnterCriticalSection(&s_lock);
+				s_linesDropped += static_cast<unsigned long>(pendingLines);
+				LeaveCriticalSection(&s_lock);
+
+				pendingBody.clear();
+				continue;
+			}
+		}
+
+		if (connection != nullptr && generation != connectionGeneration) {
+			closeHandleIfSet(connection);
+			closeHandleIfSet(session);
+		}
+
+		if (connection == nullptr) {
+			if (!openConnection(config, session, connection)) {
+				recordResult("cannot open connection to relay");
+				EnterCriticalSection(&s_lock);
+				s_nextSendTick = GetTickCount64() + 10000;
+				LeaveCriticalSection(&s_lock);
+				continue;
+			}
+			connectionGeneration = generation;
+		}
+
+		HttpResult result = postBatch(connection, config, pendingBody);
+
+		// attempts counts only failures that burn a retry (transport errors and
+		// 5xx). 429 deliberately does not: it is the relay pacing us, and letting
+		// it inflate the counter would make one subsequent 5xx drop the batch.
+		char summary[256];
+
+		if (result.transportError) {
+			// Retry the same batchId — a fresh GUID would double-post.
+			++attempts;
+			bool giveUp = attempts >= MAX_BATCH_ATTEMPTS;
+
+			sprintf_s(summary, sizeof(summary), "network error %lu (attempt %d%s)",
+				result.lastError, attempts, giveUp ? ", dropped" : "");
+			logLine("%s", summary);
+			recordResult(summary);
+
+			closeHandleIfSet(connection);
+			closeHandleIfSet(session);
+
+			EnterCriticalSection(&s_lock);
+			if (giveUp) {
+				s_linesDropped += static_cast<unsigned long>(pendingLines);
+			}
+			s_nextSendTick = GetTickCount64() + static_cast<ULONGLONG>(BATCH_INTERVAL_MS) * attempts;
+			LeaveCriticalSection(&s_lock);
+
+			if (giveUp)
+				pendingBody.clear();
+
+			continue;
+		}
+
+		if (result.statusCode >= 200 && result.statusCode < 300) {
+			long long accepted = jsonNumber(result.body, "accepted", -1);
+			long long deduped = jsonNumber(result.body, "deduped", -1);
+			long long retryAfterMs = jsonNumber(result.body, "retryAfterMs", 0);
+
+			if (retryAfterMs > static_cast<long long>(MAX_RETRY_AFTER_SECONDS) * 1000)
+				retryAfterMs = static_cast<long long>(MAX_RETRY_AFTER_SECONDS) * 1000;
+
+			sprintf_s(summary, sizeof(summary), "%lu accepted=%lld deduped=%lld",
+				result.statusCode, accepted, deduped);
+			recordResult(summary);
+
+			EnterCriticalSection(&s_lock);
+			++s_batchesAccepted;
+			s_linesAccepted += static_cast<unsigned long>(accepted > 0 ? accepted : 0);
+			if (retryAfterMs > 0)
+				s_nextSendTick = GetTickCount64() + static_cast<ULONGLONG>(retryAfterMs);
+			LeaveCriticalSection(&s_lock);
+
+			pendingBody.clear();
+			continue;
+		}
+
+		if (result.statusCode == 401 || result.statusCode == 403) {
+			// Bad or missing key. Retrying cannot help, so latch off and say so
+			// once — /emu discord on re-reads the ini and clears the latch.
+			logLine("relay rejected the key (HTTP %lu) - stopping. Fix 'key' in "
+				"DiscordBridge.ini and run /emu discord on.", result.statusCode);
+
+			sprintf_s(summary, sizeof(summary), "%lu rejected key - bridge stopped", result.statusCode);
+			recordResult(summary);
+
+			InterlockedExchange(&s_authFailed, 1);
+
+			EnterCriticalSection(&s_lock);
+			s_linesDropped += static_cast<unsigned long>(pendingLines + s_queue.size());
+			s_queue.clear();
+			LeaveCriticalSection(&s_lock);
+
+			pendingBody.clear();
+			continue;
+		}
+
+		if (result.statusCode == 429) {
+			int seconds = result.retryAfterSeconds > 0 ? result.retryAfterSeconds : 60;
+
+			sprintf_s(summary, sizeof(summary), "429 rate limited, retrying in %ds", seconds);
+			logLine("%s", summary);
+			recordResult(summary);
+
+			EnterCriticalSection(&s_lock);
+			s_nextSendTick = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
+			LeaveCriticalSection(&s_lock);
+
+			// Same batch, same batchId — it was never accepted.
+			continue;
+		}
+
+		if (result.statusCode >= 500) {
+			++attempts;
+			bool giveUp = attempts >= MAX_BATCH_ATTEMPTS;
+
+			sprintf_s(summary, sizeof(summary), "%lu server error (attempt %d%s)",
+				result.statusCode, attempts, giveUp ? ", dropped" : "");
+			logLine("%s", summary);
+			recordResult(summary);
+
+			EnterCriticalSection(&s_lock);
+			if (giveUp)
+				s_linesDropped += static_cast<unsigned long>(pendingLines);
+			s_nextSendTick = GetTickCount64() + static_cast<ULONGLONG>(BATCH_INTERVAL_MS) * attempts;
+			LeaveCriticalSection(&s_lock);
+
+			if (giveUp)
+				pendingBody.clear();
+
+			continue;
+		}
+
+		// 400 / 413 / anything else in the 4xx range: a contract violation this
+		// client will never fix by resending. Log the body — it names the
+		// offending field, e.g. lines[1].text — and drop the batch.
+		std::string bodyExcerpt = result.body;
+		if (bodyExcerpt.size() > 512)
+			bodyExcerpt.resize(512);
+
+		logLine("relay rejected batch with HTTP %lu: %s", result.statusCode,
+			bodyExcerpt.empty() ? "(no body)" : bodyExcerpt.c_str());
+
+		sprintf_s(summary, sizeof(summary), "%lu rejected batch (see debug log)", result.statusCode);
+		recordResult(summary);
+
+		EnterCriticalSection(&s_lock);
+		s_linesDropped += static_cast<unsigned long>(pendingLines);
+		LeaveCriticalSection(&s_lock);
+
+		pendingBody.clear();
+	}
+
+	closeHandleIfSet(connection);
+	closeHandleIfSet(session);
+
+	// Signalled as the last real work this thread does. shutdown() waits on
+	// this rather than the thread handle: waiting for the thread to *exit*
+	// inside DllMain would deadlock on the loader lock via DLL_THREAD_DETACH.
+	if (s_doneEvent != nullptr)
+		SetEvent(s_doneEvent);
+
+	return 0;
+}
+
+// ============================================================================
+// Lazy initialisation (main thread)
+// ============================================================================
+
+void startWorker() {
+	if (s_worker != nullptr)
+		return;
+
+	s_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	s_doneEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+	if (s_stopEvent == nullptr || s_doneEvent == nullptr) {
+		logLine("could not create worker events (%lu)", GetLastError());
+		return;
+	}
+
+	s_worker = CreateThread(nullptr, 0, workerMain, nullptr, 0, nullptr);
+
+	if (s_worker == nullptr)
+		logLine("could not create worker thread (%lu)", GetLastError());
+}
+
+// Deferred out of DllMain deliberately: ini reads and CreateThread both do
+// more than is safe under the loader lock.
+bool ensureInitialized() {
+	if (s_initialized)
+		return true;
+
+	if (!s_lockReady)
+		return false;
+
+	s_initialized = true;
+
+	Config config = loadConfigFromDisk();
+
+	EnterCriticalSection(&s_lock);
+	s_config = config;
+	++s_configGeneration;
+	LeaveCriticalSection(&s_lock);
+
+	if (config.valid) {
+		logLine("configured for %s (client id '%s', channel type %d, %s)",
+			narrowLossy(config.host).c_str(), config.clientId.c_str(), config.channelType,
+			config.enabled ? "enabled" : "disabled");
+		startWorker();
+	} else {
+		logLine("inactive: %s", config.error.c_str());
+	}
+
+	return true;
+}
+
+// ============================================================================
+// Capture path (main thread)
+// ============================================================================
+
+void noteChannelType(int type, const std::wstring& cleaned) {
+	for (size_t i = 0; i < s_observed.size(); ++i) {
+		if (s_observed[i].type == type) {
+			++s_observed[i].count;
+			return;
+		}
+	}
+
+	if (s_observed.size() >= MAX_OBSERVED_TYPES)
+		return;
+
+	ObservedChannel entry;
+	entry.type = type;
+	entry.count = 1;
+	entry.sample = narrowLossy(cleaned);
+
+	if (entry.sample.size() > 60)
+		entry.sample.resize(60);
+
+	s_observed.push_back(entry);
+
+	logLine("first line on channel type %d: %s", type, entry.sample.c_str());
+}
+
+// One client showing the guild channel in several tabs or windows produces
+// several appendText calls for a single message, all inside one dispatch. The
+// relay cannot tell that from a genuine repeat, so collapse it here before
+// occurrence is computed. The tick check keeps genuine repeats flowing if the
+// frame counter is not advancing (GroundScene::parseMessages only ticks in the
+// ground scene); duplicate calls within one dispatch are microseconds apart.
+bool localDuplicate(const std::string& text, ULONGLONG now) {
+	if (text == s_lastRelayedText && s_frameCounter == s_lastRelayedFrame &&
+		(now - s_lastRelayedTick) < DEDUPE_WINDOW_MS) {
+		return true;
+	}
+
+	s_lastRelayedText = text;
+	s_lastRelayedFrame = s_frameCounter;
+	s_lastRelayedTick = now;
+
+	return false;
+}
+
+// How many times this client has seen this exact line in the last 60 s,
+// including this one. Every guild member's client sees the same stream, so all
+// of them label the first "lol" as 1 and the second as 2 — that is what lets
+// the relay collapse cross-client duplicates without eating real repeats.
+int computeOccurrence(const std::string& text, ULONGLONG now) {
+	while (!s_history.empty() &&
+		(now - s_history.front().tick) > OCCURRENCE_WINDOW_MS) {
+		s_history.pop_front();
+	}
+
+	while (s_history.size() >= MAX_HISTORY_LINES)
+		s_history.pop_front();
+
+	int occurrence = 1;
+
+	for (std::deque<HistoryEntry>::const_iterator it = s_history.begin(); it != s_history.end(); ++it) {
+		if (it->text == text)
+			++occurrence;
+	}
+
+	HistoryEntry entry;
+	entry.tick = now;
+	entry.text = text;
+	s_history.push_back(entry);
+
+	return occurrence;
+}
+
+void enqueue(const std::string& text, int occurrence) {
+	EnterCriticalSection(&s_lock);
+
+	if (!s_stopping) {
+		while (s_queue.size() >= MAX_QUEUE_LINES) {
+			s_queue.pop_front();
+			++s_linesDropped;
+		}
+
+		QueuedLine line;
+		line.text = text;
+		line.occurrence = occurrence;
+		line.clientSeq = ++s_clientSeq;
+
+		s_queue.push_back(line);
+	}
+
+	LeaveCriticalSection(&s_lock);
+}
+
+} // anonymous namespace
+
+// ============================================================================
+// Text helpers
+// ============================================================================
+
+void DiscordBridge::cleanChatText(const wchar_t* in, size_t length, std::wstring& out) {
+	out.clear();
+
+	if (in == nullptr)
+		return;
+
+	out.reserve(length);
+
+	size_t i = 0;
+
+	while (i < length) {
+		wchar_t c = in[i];
+
+		if (c == L'\\' && (i + 1) < length) {
+			wchar_t next = in[i + 1];
+
+			if (next == L'#') {
+				if ((i + 2) < length && in[i + 2] == L'.') {   // \#. — colour reset
+					i += 3;
+					continue;
+				}
+
+				if ((i + 7) < length &&                        // \#RRGGBB
+					isHexDigit(in[i + 2]) && isHexDigit(in[i + 3]) && isHexDigit(in[i + 4]) &&
+					isHexDigit(in[i + 5]) && isHexDigit(in[i + 6]) && isHexDigit(in[i + 7])) {
+					i += 8;
+					continue;
+				}
+			} else if (next == L'>') {
+				if ((i + 4) < length &&                        // \>NNN — indent
+					isDigit(in[i + 2]) && isDigit(in[i + 3]) && isDigit(in[i + 4])) {
+					i += 5;
+					continue;
+				}
+			}
+		}
+
+		// Control characters would have to be JSON-escaped and serve no purpose
+		// in a Discord message. Mapping them to spaces is deterministic, which
+		// is what matters for the relay's cross-client dedupe hash.
+		out.push_back((c < 0x20 || c == 0x7F) ? L' ' : c);
+		++i;
+	}
+
+	trimWide(out);
+
+	if (out.size() > MAX_LINE_CHARS) {
+		out.resize(MAX_LINE_CHARS);
+
+		// Never leave a lone high surrogate at the end.
+		if (!out.empty() && out[out.size() - 1] >= 0xD800 && out[out.size() - 1] <= 0xDBFF)
+			out.erase(out.size() - 1);
+
+		trimWide(out);
+	}
+}
+
+bool DiscordBridge::utf16ToUtf8(const wchar_t* in, size_t length, std::string& out) {
+	out.clear();
+
+	if (in == nullptr || length == 0)
+		return true;
+
+	int needed = WideCharToMultiByte(CP_UTF8, 0, in, static_cast<int>(length), nullptr, 0, nullptr, nullptr);
+
+	if (needed <= 0)
+		return false;
+
+	out.resize(static_cast<size_t>(needed));
+
+	int written = WideCharToMultiByte(CP_UTF8, 0, in, static_cast<int>(length),
+		&out[0], needed, nullptr, nullptr);
+
+	if (written <= 0) {
+		out.clear();
+		return false;
+	}
+
+	out.resize(static_cast<size_t>(written));
+
+	return true;
+}
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
+void DiscordBridge::initialize(HMODULE selfModule) {
+	if (s_lockReady)
+		return;
+
+	s_module = selfModule;
+
+	InitializeCriticalSection(&s_lock);
+	s_lockReady = true;
+}
+
+void DiscordBridge::shutdown(bool processExiting) {
+	if (!s_lockReady)
+		return;
+
+	if (processExiting) {
+		// The process is going away: every other thread has already been
+		// TERMINATED — possibly mid-hold on s_lock, so acquiring it here could
+		// deadlock the exit path. Touch nothing; the OS reclaims it all.
+		return;
+	}
+
+	EnterCriticalSection(&s_lock);
+	s_stopping = true;
+	s_queue.clear();
+	LeaveCriticalSection(&s_lock);
+
+	if (s_worker != nullptr) {
+		if (s_stopEvent != nullptr)
+			SetEvent(s_stopEvent);
+
+		if (s_doneEvent == nullptr ||
+			WaitForSingleObject(s_doneEvent, WORKER_JOIN_TIMEOUT_MS) != WAIT_OBJECT_0) {
+			// Mid-request and unresponsive. Leaking the handles and the lock is
+			// strictly better than freeing memory the worker still reads.
+			logLine("worker did not stop in time; leaving resources allocated");
+			return;
+		}
+
+		CloseHandle(s_worker);
+		s_worker = nullptr;
+	}
+
+	if (s_stopEvent != nullptr) {
+		CloseHandle(s_stopEvent);
+		s_stopEvent = nullptr;
+	}
+
+	if (s_doneEvent != nullptr) {
+		CloseHandle(s_doneEvent);
+		s_doneEvent = nullptr;
+	}
+
+	s_lockReady = false;
+	DeleteCriticalSection(&s_lock);
+}
+
+void DiscordBridge::onFrame() {
+	++s_frameCounter;
+
+	if (!s_initialized)
+		ensureInitialized();
+}
+
+// ============================================================================
+// Chat capture
+// ============================================================================
+
+void DiscordBridge::onChatAppend(const void* channelId, const void* chatString) {
+	if (channelId == nullptr || chatString == nullptr)
+		return;
+
+	if (!ensureInitialized())
+		return;
+
+	int channelType = 0;
+
+	if (!seh_readChannelType(channelId, channelType))
+		return;
+
+	bool interesting = (channelType == s_config.channelType);
+	bool newType = true;
+
+	for (size_t i = 0; i < s_observed.size(); ++i) {
+		if (s_observed[i].type == channelType) {
+			++s_observed[i].count;
+			newType = false;
+			break;
+		}
+	}
+
+	// Nothing else to do for channels we are not relaying, unless this is the
+	// first time we have seen the type — then clean one line as a sample so
+	// /emu discord types can identify it.
+	if (!interesting && !newType)
+		return;
+
+	wchar_t raw[MAX_RAW_CHAT_CHARS];
+	size_t rawLength = 0;
+
+	if (!seh_copyChatText(chatString, raw, MAX_RAW_CHAT_CHARS, rawLength))
+		return;
+
+	std::wstring cleaned;
+	cleanChatText(raw, rawLength, cleaned);
+
+	if (newType)
+		noteChannelType(channelType, cleaned);
+
+	if (!interesting)
+		return;
+
+	if (!s_config.valid || !s_config.enabled)
+		return;
+
+	if (InterlockedCompareExchange(&s_authFailed, 0, 0) != 0)
+		return;
+
+	if (cleaned.empty())
+		return;   // relay rejects blank text, and it would fail the whole batch
+
+	std::string utf8;
+
+	if (!utf16ToUtf8(cleaned.c_str(), cleaned.size(), utf8) || utf8.empty())
+		return;
+
+	ULONGLONG now = GetTickCount64();
+
+	if (localDuplicate(utf8, now))
+		return;
+
+	enqueue(utf8, computeOccurrence(utf8, now));
+}
+
+void SwgCuiChatWindowTab::appendText(const ChatChannelId& id, const soe::unicode& text) {
+	DiscordBridge::onChatAppend(&id, &text);
+
+	originalAppendText::run(this, id, text);
+}
+
+// ============================================================================
+// /emu discord
+// ============================================================================
+
+bool DiscordBridge::isEnabled() {
+	ensureInitialized();
+
+	return s_config.valid && s_config.enabled && InterlockedCompareExchange(&s_authFailed, 0, 0) == 0;
+}
+
+void DiscordBridge::setEnabled(bool value) {
+	ensureInitialized();
+
+	if (value) {
+		// Re-read the ini so a corrected endpoint or key takes effect without a
+		// client restart, and clear the 401 latch.
+		Config config = loadConfigFromDisk();
+		config.enabled = true;
+
+		EnterCriticalSection(&s_lock);
+		s_config = config;
+		++s_configGeneration;
+		s_stopping = false;
+		s_nextSendTick = 0;
+		LeaveCriticalSection(&s_lock);
+
+		InterlockedExchange(&s_authFailed, 0);
+
+		if (config.valid)
+			startWorker();
+
+		return;
+	}
+
+	EnterCriticalSection(&s_lock);
+	s_config.enabled = false;
+	s_queue.clear();
+	LeaveCriticalSection(&s_lock);
+}
+
+void DiscordBridge::enqueueTestLine() {
+	ensureInitialized();
+
+	std::wstring cleaned;
+	wchar_t sample[256];
+
+	// Deliberately carries escapes so the strip path is exercised end to end.
+	swprintf_s(sample, _countof(sample),
+		L"\\#00ff00GalaxyExtender\\>032: \\#ffffffbridge test %llu\\>000",
+		static_cast<unsigned long long>(GetTickCount64() / 1000));
+
+	cleanChatText(sample, wcslen(sample), cleaned);
+
+	std::string utf8;
+
+	if (!utf16ToUtf8(cleaned.c_str(), cleaned.size(), utf8) || utf8.empty())
+		return;
+
+	ULONGLONG now = GetTickCount64();
+
+	enqueue(utf8, computeOccurrence(utf8, now));
+}
+
+void DiscordBridge::appendStatus(std::string& out) {
+	ensureInitialized();
+
+	Config config;
+	size_t queueDepth = 0;
+	std::string lastResult;
+	ULONGLONG lastResultTick = 0;
+	unsigned long batchesAccepted = 0;
+	unsigned long linesAccepted = 0;
+	unsigned long linesDropped = 0;
+	ULONGLONG nextSendTick = 0;
+	bool workerRunning = false;
+
+	EnterCriticalSection(&s_lock);
+	config = s_config;
+	queueDepth = s_queue.size();
+	lastResult = s_lastResult;
+	lastResultTick = s_lastResultTick;
+	batchesAccepted = s_batchesAccepted;
+	linesAccepted = s_linesAccepted;
+	linesDropped = s_linesDropped;
+	nextSendTick = s_nextSendTick;
+	workerRunning = (s_worker != nullptr);
+	LeaveCriticalSection(&s_lock);
+
+	bool authFailed = InterlockedCompareExchange(&s_authFailed, 0, 0) != 0;
+	ULONGLONG now = GetTickCount64();
+
+	char line[512];
+
+	out += "\\#88ccffDiscord bridge status:\\#ffffff\n";
+
+	if (!config.valid) {
+		sprintf_s(line, sizeof(line), "  state: \\#ff4444not configured\\#ffffff (%s)\n",
+			config.error.empty() ? "no endpoint" : config.error.c_str());
+		out += line;
+	} else if (authFailed) {
+		out += "  state: \\#ff4444stopped\\#ffffff - relay rejected the key. "
+			"Fix 'key' in DiscordBridge.ini, then /emu discord on\n";
+	} else if (!config.enabled) {
+		out += "  state: \\#ffcc00off\\#ffffff\n";
+	} else {
+		sprintf_s(line, sizeof(line), "  state: \\#00ff00on\\#ffffff (worker %s)\n",
+			workerRunning ? "running" : "not started");
+		out += line;
+	}
+
+	if (config.valid) {
+		// Host only — the key never leaves this process in readable form.
+		sprintf_s(line, sizeof(line), "  relay host: %s (%s)\n",
+			narrowLossy(config.host).c_str(), config.https ? "https" : "http");
+		out += line;
+	}
+
+	sprintf_s(line, sizeof(line), "  client id: %s%s%s\n",
+		config.clientId.c_str(),
+		config.character.empty() ? "" : "   character: ",
+		config.character.empty() ? "" : config.character.c_str());
+	out += line;
+
+	sprintf_s(line, sizeof(line), "  guild channel type: %d   frames: %llu\n",
+		config.channelType, static_cast<unsigned long long>(s_frameCounter));
+	out += line;
+
+	sprintf_s(line, sizeof(line), "  queue: %u line(s)   60s history: %u   dropped: %lu\n",
+		static_cast<unsigned>(queueDepth), static_cast<unsigned>(s_history.size()), linesDropped);
+	out += line;
+
+	sprintf_s(line, sizeof(line), "  accepted: %lu line(s) in %lu batch(es)\n",
+		linesAccepted, batchesAccepted);
+	out += line;
+
+	if (lastResult.empty()) {
+		out += "  last result: (nothing sent yet)\n";
+	} else {
+		sprintf_s(line, sizeof(line), "  last result: %s (%llus ago)\n",
+			lastResult.c_str(),
+			static_cast<unsigned long long>((now - lastResultTick) / 1000));
+		out += line;
+	}
+
+	if (nextSendTick > now) {
+		sprintf_s(line, sizeof(line), "  sending paused for %llus\n",
+			static_cast<unsigned long long>((nextSendTick - now) / 1000));
+		out += line;
+	}
+}
+
+void DiscordBridge::appendChannelTypes(std::string& out) {
+	ensureInitialized();
+
+	out += "\\#88ccffObserved chat channel types:\\#ffffff\n";
+
+	if (s_observed.empty()) {
+		out += "  (nothing seen yet - chat has to arrive while the DLL is loaded)\n";
+		return;
+	}
+
+	char line[256];
+
+	for (size_t i = 0; i < s_observed.size(); ++i) {
+		const ObservedChannel& entry = s_observed[i];
+
+		sprintf_s(line, sizeof(line), "  type %-3d %6lu line(s)%s  %s\n",
+			entry.type, entry.count,
+			entry.type == s_config.channelType ? " \\#00ff00<- relayed\\#ffffff" : "",
+			entry.sample.c_str());
+		out += line;
+	}
+
+	sprintf_s(line, sizeof(line),
+		"  Relaying type %d. If guild chat shows a different type, set "
+		"channel_type in DiscordBridge.ini.\n", s_config.channelType);
+	out += line;
+}

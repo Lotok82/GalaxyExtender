@@ -72,12 +72,17 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
     <IncludePath>$(IncludePath)</IncludePath>
+    <!-- Anchored to the project's parent (the solution folder) rather than $(SolutionDir),
+         which is undefined when the .vcxproj is built directly — without this, direct builds
+         land in a second Release/Debug folder inside the project directory. -->
+    <OutDir>$(MSBuildProjectDirectory)\..\$(Configuration)\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
+    <OutDir>$(MSBuildProjectDirectory)\..\$(Configuration)\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
@@ -179,6 +184,7 @@
     <ClInclude Include="CuiMediatorFactory.h" />
     <ClInclude Include="CustomizationData.h" />
     <ClInclude Include="CuiWidget3dObjectListViewer.h" />
+    <ClInclude Include="DiscordBridge.h" />
     <ClInclude Include="EmuCommandParser.h" />
     <ClInclude Include="FoodDrinkMonitor.h" />
     <ClInclude Include="FreeChaseCamera.h" />
@@ -199,6 +205,7 @@
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="soewrappers.h" />
     <ClInclude Include="SwgCuiChatWindow.h" />
+    <ClInclude Include="SwgCuiChatWindowTab.h" />
     <ClInclude Include="SwgCuiCommandParserDefault.h" />
     <ClInclude Include="SwgCuiConsole.h" />
     <ClInclude Include="SwgCuiLoginScreen.h" />
@@ -222,6 +229,7 @@
     <ClCompile Include="ClientProceduralTerrainAppearance.cpp" />
     <ClCompile Include="CommandParser.cpp" />
     <ClCompile Include="CuiChatParser.cpp" />
+    <ClCompile Include="DiscordBridge.cpp" />
     <ClCompile Include="dllmain.cpp">
       <CompileAsManaged Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</CompileAsManaged>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">

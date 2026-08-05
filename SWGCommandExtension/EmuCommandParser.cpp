@@ -16,6 +16,7 @@
 #include "ObjectAttributeManager.h"
 #include "FoodDrinkMonitor.h"
 #include "CustomizationData.h"
+#include "DiscordBridge.h"
 
 static float s_originalHoverHeight = 0.0f;
 static bool s_hoverHeightStored = false;
@@ -634,6 +635,60 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 		resultUnicode += msg;
 
 		return true;
+	} else if (command == L"discord") {
+		// Guild chat -> relay -> Discord. Configuration (endpoint + key) lives
+		// in DiscordBridge.ini beside the DLL; nothing secret is printed here.
+		if (args.size() < 3) {
+			resultUnicode += L"\\#88ccffUsage:\\#ffffff\n";
+			resultUnicode += L"  /emu discord on - enable relaying (re-reads DiscordBridge.ini)\n";
+			resultUnicode += L"  /emu discord off - stop relaying\n";
+			resultUnicode += L"  /emu discord status - state, relay host, queue depth, last HTTP result\n";
+			resultUnicode += L"  /emu discord test - queue a synthetic line\n";
+			resultUnicode += L"  /emu discord types - chat channel types seen so far (guild-channel check)\n";
+
+			return true;
+		}
+
+		auto& subcmd = args[2];
+
+		if (subcmd == L"on") {
+			DiscordBridge::setEnabled(true);
+
+			if (DiscordBridge::isEnabled()) {
+				resultUnicode += L"\\#00ff00Discord bridge enabled.\\#ffffff Guild chat will be relayed.\n";
+			} else {
+				resultUnicode += L"\\#ff4444Could not enable the Discord bridge.\\#ffffff\n";
+			}
+
+			std::string status;
+			DiscordBridge::appendStatus(status);
+			resultUnicode += status.c_str();
+		} else if (subcmd == L"off") {
+			DiscordBridge::setEnabled(false);
+			resultUnicode += L"\\#ffcc00Discord bridge disabled.\\#ffffff Queued lines discarded.";
+		} else if (subcmd == L"status") {
+			std::string status;
+			DiscordBridge::appendStatus(status);
+			resultUnicode += status.c_str();
+		} else if (subcmd == L"types") {
+			std::string types;
+			DiscordBridge::appendChannelTypes(types);
+			resultUnicode += types.c_str();
+		} else if (subcmd == L"test") {
+			DiscordBridge::enqueueTestLine();
+
+			if (DiscordBridge::isEnabled()) {
+				resultUnicode += L"Test line queued. Run \\#88ccff/emu discord status\\#ffffff in a "
+					L"few seconds to see the relay's response.";
+			} else {
+				resultUnicode += L"\\#ffcc00Test line queued, but the bridge is not sending.\\#ffffff "
+					L"Check \\#88ccff/emu discord status\\#ffffff.";
+			}
+		} else {
+			resultUnicode += L"Unknown discord subcommand. Use /emu discord for help.";
+		}
+
+		return true;
 	} else if (command == L"help") {
 		showHelp(resultUnicode);
 
@@ -669,5 +724,6 @@ void EmuCommandParser::showHelp(soe::unicode& resultUnicode) {
 	resultUnicode += L"/emu drink - Shows current Drink fill value with percentage.\n";
 	resultUnicode += L"/emu memscan - Memory scanning tools to discover PlayerObject field offsets.\n";
 	resultUnicode += L"/emu hover [value|reset] - Get/set vehicle hover height. No args shows current, 'reset' restores default.\n";
+	resultUnicode += L"/emu discord <on|off|status|test|types> - Guild chat bridge to Discord. Needs DiscordBridge.ini beside the DLL.\n";
 	resultUnicode += L"/emu help - This command, which lists help info on available extension commands.\n";
 }
