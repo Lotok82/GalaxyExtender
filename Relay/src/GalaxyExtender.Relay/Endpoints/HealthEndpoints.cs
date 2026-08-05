@@ -34,6 +34,7 @@ public static class HealthEndpoints
                     id = HostProbe.ProcessId,
                     startedUtc = HostProbe.StartedUtc,
                     uptimeSeconds = (long)(now - HostProbe.StartedUtc).TotalSeconds,
+                    processStartedUtc = HostProbe.ProcessStartedUtc,
                     framework = probe.Framework,
                     os = probe.OperatingSystem
                 },
@@ -56,7 +57,8 @@ public static class HealthEndpoints
                 {
                     appDataWritable = appData.Writable,
                     appDataReadBackOk = appData.ReadBackOk,
-                    appDataError = appData.Error
+                    appDataError = appData.Error,
+                    fileLoggingError = HostProbe.FileLoggingError
                 },
 
                 config = new

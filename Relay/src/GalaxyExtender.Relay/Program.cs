@@ -5,38 +5,56 @@ using Microsoft.AspNetCore.Builder;
 using Serilog;
 using Serilog.Events;
 
+// Before anything else, so uptime measures app start rather than first request.
+HostProbe.StampStartup();
+
 var builder = WebApplication.CreateBuilder(args);
 
 // ---------------------------------------------------------------------------
 // Logging. Console output is invisible under IIS, so the file sink is the only
-// way to see anything on the host. shared: true because a web garden would have
-// two worker processes writing the same file.
+// way to see anything on the host.
+//
+// Logging must never be the reason the app fails to start. An unwritable App_Data
+// on shared hosting would otherwise produce an HTTP 500.30 with no way to
+// diagnose it — /api/v1/health is what reports the problem, and it cannot report
+// anything if we throw first. Note the failure can surface at CreateLogger()
+// rather than at WriteTo.File(), because that is when the sink opens the file.
 // ---------------------------------------------------------------------------
-var loggerConfiguration = new LoggerConfiguration()
-    .MinimumLevel.Information()
-    .MinimumLevel.Override("Microsoft.AspNetCore", LogEventLevel.Warning)
-    .Enrich.FromLogContext()
-    .Enrich.WithProperty("pid", Environment.ProcessId)
-    .WriteTo.Console();
+Serilog.Core.Logger BuildLogger(string? logDirectory)
+{
+    var configuration = new LoggerConfiguration()
+        .MinimumLevel.Information()
+        .MinimumLevel.Override("Microsoft.AspNetCore", LogEventLevel.Warning)
+        .Enrich.FromLogContext()
+        .Enrich.WithProperty("pid", Environment.ProcessId)
+        .WriteTo.Console();
+
+    if (logDirectory is not null)
+    {
+        configuration = configuration.WriteTo.File(
+            Path.Combine(logDirectory, "relay-.log"),
+            rollingInterval: RollingInterval.Day,
+            retainedFileCountLimit: 14,
+            shared: true);
+    }
+
+    return configuration.CreateLogger();
+}
 
 try
 {
     var logDirectory = Path.Combine(builder.Environment.ContentRootPath, "App_Data", "logs");
     Directory.CreateDirectory(logDirectory);
-    loggerConfiguration.WriteTo.File(
-        Path.Combine(logDirectory, "relay-.log"),
-        rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: 14,
-        shared: true);
+    Log.Logger = BuildLogger(logDirectory);
 }
 catch (Exception ex)
 {
-    // A read-only App_Data must not stop the app from starting — /api/v1/health is what
-    // reports the problem, and it cannot report anything if we throw here.
-    Console.Error.WriteLine($"File logging disabled, App_Data not writable: {ex.Message}");
+    // Console-only fallback. Surfaced through /api/v1/health, since by definition we
+    // cannot write this to the log file.
+    HostProbe.FileLoggingError = $"{ex.GetType().Name}: {ex.Message}";
+    Log.Logger = BuildLogger(null);
 }
 
-Log.Logger = loggerConfiguration.CreateLogger();
 builder.Host.UseSerilog();
 
 // ---------------------------------------------------------------------------
