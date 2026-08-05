@@ -1,7 +1,24 @@
 # Discord Relay — Implementation Plan (.NET 8)
 
-Status: **Phase 0 complete (scaffold + host probe, builds and runs locally). Awaiting first deploy to the host.**
+Status: **Phase 0 complete and LIVE on the host.** Ready for Phase 1.
 Last updated: 2026-08-05
+
+Deployed at `https://mesanderson.co.uk/relay` (subfolder registered as an IIS application). Confirmed from `/api/v1/health` on 2026-08-05:
+
+| Fact | Value |
+|---|---|
+| Runtime | .NET 8.0.29, Windows Server 2019 (10.0.17763) |
+| Hosting | in-process, dedicated IIS app pool, **1 worker process** |
+| TLS | `isHttps: true` reported correctly → `RequireHttps` enabled |
+| `App_Data` | writable, file logging active |
+| Config delivery | `appsettings.Production.json` (git-ignored, not part of the publish output, so it survives redeploys) — webhook + API key both loaded |
+
+| Outbound to Discord | ✅ `reachable: true`, HTTP 200 in 194 ms from the app pool |
+| Worker process | ✅ `process.id` identical across readings 4 minutes apart (50400), `startedUtc` unchanged, `uptimeSeconds` 0 → 240 |
+
+**Consequences:** the app pool makes outbound HTTPS calls, so the relay approach is viable end to end. The single stable pid confirms the Plesk `maxProcesses = 1` setting, so `FileStateStore` needs no cross-process mutex.
+
+**Not proven:** idle-stop behaviour. Four minutes is well inside a typical 20-minute idle timeout, so state must still be durable on disk — that constraint stands.
 Code: [../Relay/](../Relay/) — see [../Relay/README.md](../Relay/README.md) for the operational reference.
 Companion to [discord-bridge-plan.md](discord-bridge-plan.md) and [discord-bridge-research.md](discord-bridge-research.md).
 
@@ -38,7 +55,7 @@ Hosting is **IIS shared hosting**, which is the single biggest design driver:
 | Constraint | Consequence |
 |---|---|
 | App pool idle-stops and recycles on its own schedule | **No background services, no timers, no in-memory-only state.** Everything happens inside a request; all state that matters is durable. |
-| Possible web garden (`maxProcesses > 1`) | In-process caches can diverge between worker processes. Dedupe state must be **cross-process safe**, not just thread-safe. |
+| ~~Possible web garden~~ — **resolved 2026-08-05**: dedicated IIS application pool enabled with **1 worker process** | Cross-process safety is no longer required, so the state store drops the named mutex and becomes a plain read-modify-write behind a normal in-process lock. Confirm empirically after deploy: `/api/v1/health` → `process.id` stable across calls. Keep the `IStateStore` seam so this can be reinstated if the pool config ever changes. |
 | Runtime version is whatever the host installed | Target **net8.0** — ✅ confirmed supported by the host (2026-08-05). Self-contained publish remains the fallback if the hosting bundle turns out to be absent in practice. |
 | Shared box, unknown neighbours | Small footprint, no SQL Server dependency, strict request limits. |
 
@@ -104,7 +121,9 @@ Request ──► auth ──► rate limit ──► ChatEndpoint
 
 ### StateStore — the crux
 
-Single JSON document under `App_Data/relay-state.json`, guarded by a `Global\GalaxyExtenderRelay` named mutex so it is correct across threads **and** worker processes. Read-modify-write per mutating request, atomic replace (write temp → `File.Move` with overwrite). Traffic is a handful of chat lines per second at worst, so the simplicity is worth more than the IO.
+Single JSON document under `App_Data/relay-state.json`. Read-modify-write per mutating request, atomic replace (write temp → `File.Move` with overwrite), under an in-process lock. Traffic is a handful of chat lines per second at worst, so the simplicity is worth more than the IO.
+
+The pool is configured with a single worker process (confirmed 2026-08-05), so a `Global\` named mutex is **not** needed — but the file must still be durable, because the pool idle-stops and recycles. If the pool ever gains workers, reinstate the mutex inside `FileStateStore`; nothing outside `IStateStore` should care.
 
 Contents:
 
@@ -165,7 +184,7 @@ Minimal dependency set: framework only, plus `Serilog.AspNetCore` + `Serilog.Sin
 
 | # | Phase | Deliverable | Est. |
 |---|---|---|---|
-| 0 | Scaffold + **deploy spike** | ✅ Solution, project, `web.config`, `/health` + `/health/outbound`, Serilog to `App_Data/logs`, 3 smoke tests. Builds and runs locally on the 8.0 runtime; Discord reachable. **Remaining: upload `publish/` and confirm it answers over HTTPS from the internet** before Phase 1 begins. | 1–2 h |
+| 0 | Scaffold + **deploy spike** | ✅ **Done.** Solution, project, `web.config`, `/health` + `/health/outbound`, Serilog to `App_Data/logs`, 7 tests. Live on the host over HTTPS. Two defects found and fixed by doing this first: logging failure could kill startup (Serilog opens the file at `CreateLogger()`, outside the guard), and `StartedUtc` initialised lazily on first request so uptime was meaningless. | 1–2 h |
 | 1 | Contract + auth | DTOs, key validation, rate limiter, body/line limits, `POST /chat` returning counts without touching Discord. | 1–2 h |
 | 2 | State + dedupe | `FileStateStore` w/ named mutex, atomic replace, pruning; `DedupeService` incl. `occurrence` logic and `batchId` idempotency. | 2–3 h |
 | 3 | Sanitize + publish | `TextSanitizer`, `DiscordPublisher`, embed build/split, `allowed_mentions` lockdown. First real message in Discord. | 2 h |

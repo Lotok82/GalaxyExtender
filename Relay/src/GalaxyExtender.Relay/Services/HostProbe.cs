@@ -13,11 +13,48 @@ namespace GalaxyExtender.Relay.Services;
 /// </summary>
 public sealed class HostProbe(IHttpClientFactory httpClientFactory, IHostEnvironment environment)
 {
+    private static DateTimeOffset _startedUtc = DateTimeOffset.UtcNow;
+
     /// <summary>
-    /// Captured once per process load. Comparing this across two calls detects an app-pool
-    /// recycle; if it keeps moving, the pool is idle-stopping aggressively.
+    /// App start. Comparing this across two calls detects an app-pool recycle; if it keeps moving,
+    /// the pool is idle-stopping aggressively.
+    ///
+    /// Stamped explicitly by <see cref="StampStartup"/> rather than by a static initialiser: a
+    /// static field initialises lazily on first touch, which is the first request, so uptime would
+    /// always read ~0 and the reading would be worthless for its one purpose.
     /// </summary>
-    public static readonly DateTimeOffset StartedUtc = DateTimeOffset.UtcNow;
+    public static DateTimeOffset StartedUtc => _startedUtc;
+
+    /// <summary>Call once at the top of Program.cs, before the host is built.</summary>
+    public static void StampStartup() => _startedUtc = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Start time of the OS process, where the host permits reading it. Distinguishes an app
+    /// restart (this stays put, <see cref="StartedUtc"/> moves) from a full worker-process
+    /// recycle (both move). Null if the hosting environment denies access.
+    /// </summary>
+    public static DateTimeOffset? ProcessStartedUtc
+    {
+        get
+        {
+            try
+            {
+                using var process = Process.GetCurrentProcess();
+                return process.StartTime.ToUniversalTime();
+            }
+            catch (Exception)
+            {
+                // Restricted shared hosting can deny this; it is a nice-to-have, not a blocker.
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Set during startup if the file log sink could not be initialised. The app deliberately
+    /// continues without file logging, so this is the only channel that can report it.
+    /// </summary>
+    public static string? FileLoggingError { get; set; }
 
     /// <summary>
     /// Differing process ids across successive calls mean a web garden (maxProcesses > 1),
