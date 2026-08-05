@@ -199,6 +199,11 @@ The project reimplements SOE's custom STL-like types because the client uses its
 | `0x00b399a0` | `CustomizationDataProperty::fetchCustomizationData()` |
 | `0x00b32850` | `CustomizationData::findConstVariable(const std::string&)` |
 | `0x00b33510` | `CustomizationData::registerModificationListener()` |
+| | |
+| **Discord Chat Bridge** (not yet hooked — see [discord-bridge-plan.md](discord-bridge-plan.md)) | |
+| `0x0102DA80` | `SwgCuiChatWindow::Tab::appendText(const ChannelId&, const Unicode::String&)` — `__thiscall`, `this` = Tab. Chat choke point; every line reaching any tab passes through it |
+| `0x0102D2D0` | `SwgCuiChatWindow::Tab::hasChannel(const ChannelId&)` |
+| `0x00F364B0` | `SwgCuiChatWindow` constructor (already used by `SwgCuiChatWindow.h`) |
 
 ---
 

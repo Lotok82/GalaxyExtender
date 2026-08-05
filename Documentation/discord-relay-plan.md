@@ -197,6 +197,12 @@ Roughly **1.5–2 days**. Phases 0–3 are the minimum that puts guild chat in D
 
 **Phase 0 is a gate, not a formality.** The one assumption that can invalidate the whole plan is whether the host will run an ASP.NET Core 8 app at all, so a hello-world deploy happens before any relay logic is written. If it fails, the fallbacks (self-contained `win-x86` publish, then a .NET Framework 4.8 port) get chosen while nothing has been built on top of the wrong assumption.
 
+### Next actions (as of 2026-08-05)
+
+1. **Redeploy `Relay/publish/` to the host.** The live deployment is still running the pre-`eeb1ac8` binary — the startup-logging fix is not on it, so an `App_Data` permission change would produce another blind 500.30. (Config is current; only the DLLs are stale.)
+2. **Relay Phase 1** — contracts, key validation (match-any-key, non-short-circuiting fixed-time compare), rate limiter, body/line limits, `POST /api/v1/chat` returning accept/dedupe counts *without* touching Discord. Deliberately inert so the extension can exercise the full request path before anything can post to the channel.
+3. **Extension side** is tracked separately in [discord-bridge-plan.md](discord-bridge-plan.md) and has not been started. It can be built in parallel against the documented contract.
+
 ### Test cases worth naming up front
 
 - Two clients POST the same line → one Discord post, second response reports `deduped: 1`.

@@ -5,8 +5,11 @@ plan live in [../Documentation/discord-relay-plan.md](../Documentation/discord-r
 this file is the operational reference and the wire contract the C++ side codes against.
 
 - **Target:** `net8.0`, ASP.NET Core minimal API
-- **Host:** IIS shared hosting, in-process (`AspNetCoreModuleV2`)
-- **Status:** Phase 0 complete (scaffold + host probe). Relay logic starts at Phase 1.
+- **Host:** IIS shared hosting (Plesk), in-process (`AspNetCoreModuleV2`), dedicated app pool, 1 worker process
+- **Live at:** `https://mesanderson.co.uk/relay` — subfolder registered as an IIS application
+- **Status:** **Phase 0 of 7 complete** — scaffold + host probe, deployed and verified. `POST /api/v1/chat` is **not implemented yet** (Phase 1); only `/health`, `/health/outbound` and `/` respond today.
+
+Verified on the host 2026-08-05: .NET 8.0.29 / Windows Server 2019, outbound to discord.com reachable (200 in 194 ms), `App_Data` writable, `process.id` stable across 4 minutes, `isHttps` reported correctly so `RequireHttps` is enabled.
 
 ## Layout
 
