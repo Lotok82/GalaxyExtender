@@ -90,9 +90,9 @@ Base path `/api/v1`. HTTPS only. Auth on every endpoint: header `X-Relay-Key: <s
 - `clientSeq` — monotonic per client, ordering + debugging only.
 - Status codes: `401` bad key, `413` oversize, `429` rate-limited (with `Retry-After`), `503` webhook not configured.
 
-### `GET /api/v1/messages?after=<cursor>&limit=50` — Stage 2 placeholder
+### `GET /api/v1/messages?client=<id>` — Stage 2 work queue (stub shipped)
 
-Ships now returning `{ "messages": [], "cursor": "<echo>" }` plus a `X-Relay-Stage2: disabled` header, so the extension's polling code can be written and exercised against the real endpoint before the bot token exists.
+**Contract revised under Stage 2's claim semantics — a work-queue consume, not a broadcast read** (the `after` cursor was dropped: the relay owns queue position, a client cursor would fight redelivery). A 200 claims the returned messages (≤5, oldest first) for this key+client until a 60 s redelivery timeout, max 2 redeliveries, then dropped and counted in the response's `dropped` field. The pinned contract lives in [../Relay/README.md](../Relay/README.md); the R1 stub ships it returning `{ "messages": [], "dropped": 0 }` plus a `X-Relay-Stage2: disabled` header, so the extension's polling code can be written and exercised against the real endpoint before the bot token exists.
 
 ### `GET /api/v1/health`
 
@@ -191,7 +191,7 @@ Minimal dependency set: framework only, plus `Serilog.AspNetCore` + `Serilog.Sin
 | 4 | Outbox + 429 | ✅ **Done.** Durable outbox in the state file, opportunistic drain (chat POST + heartbeat, ≤5 entries/request, stop on first failure), one bounded ≤2 s in-request retry on 429, exponential backoff capped 300 s, drop after `OutboxMaxAttempts` with an error log. `POST /api/v1/heartbeat` returns outbox depth. | 1–2 h |
 | 5 | Tests | ✅ **Done.** 65 total. `FakeDiscordHandler` records payloads and scripts 429s; covers the named cases below plus sanitizer and state-store units. | 2–3 h |
 | 6 | Harden deploy | Prove survival across an app-pool recycle and across a redeploy (state file must not be wiped); confirm outbound HTTPS to discord.com; turn off `stdoutLogEnabled`. | 1–2 h |
-| 7 | Stage 2 stubs | `GET /messages` placeholder + cursor plumbing so the extension can be written against it. | 1 h |
+| 7 | Stage 2 stubs | ✅ **Done (2026-08-05).** Claim contract pinned in Relay/README.md (consume semantics, no cursor, `dropped` count, 60 s redelivery, ≤5/poll); `GET /messages` stub authenticated + rate-limited like /chat, answers empty + `X-Relay-Stage2: disabled`. 77 tests. | 1 h |
 
 Roughly **1.5–2 days**. Phases 0–3 are the minimum that puts guild chat in Discord with correct de-dup; 4–6 are what make it trustworthy unattended.
 

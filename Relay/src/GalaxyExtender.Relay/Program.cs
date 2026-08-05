@@ -188,6 +188,7 @@ try
 
     app.MapHealthEndpoints();
     app.MapChatEndpoints();
+    app.MapMessagesEndpoints();
 
     Log.Information("Relay starting. pid={Pid} env={Environment} contentRoot={ContentRoot}",
         Environment.ProcessId, app.Environment.EnvironmentName, app.Environment.ContentRootPath);
