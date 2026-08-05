@@ -1,6 +1,6 @@
 # Discord Chat Bridge — Stage 2 (Discord → game) Investigation Plan
 
-Status: **S1/S2 spike instrumentation built (extension side); awaiting the in-game session for findings. Decision made: Model B — Discord messages are injected into the real guild room** so every guild member sees them, extension or not. Messages carry a `[Discord]` text marker; marked lines are never forwarded back to Discord.
+Status: **S1/S2 spike COMPLETE — send path confirmed end-to-end 2026-08-05** (injected line visible in guild chat, seen by a second player, relayed to Discord). The last real unknown is resolved; remaining work is engineering: R1 claim-contract stub next. **Decision made: Model B — Discord messages are injected into the real guild room** so every guild member sees them, extension or not. Messages carry a `[Discord]` text marker; marked lines are never forwarded back to Discord.
 Last updated: 2026-08-05
 
 Companion docs: [discord-bridge-plan.md](discord-bridge-plan.md) (Stage 1, as built), [discord-bridge-research.md](discord-bridge-research.md) (binary/source findings), [discord-relay-plan.md](discord-relay-plan.md) (relay).
@@ -44,7 +44,7 @@ From the live session (`/emu discord rooms` after typing in the guild tab, then 
 - **Slash commands typed in the guild tab arrive with the same room id and `useChatRoom=1`** (`/console` logged identically to plain lines). So the S2 stopgap cache populates from *any* line typed in the guild tab, commands included — e.g. running `/emu discord rooms` from the guild tab is itself enough to cache the id. The `s_guildRoomId` static hunt is only needed if requiring one typed line per session is deemed too much friction for injector clients.
 - **`/emu discord inject Test Text` → `originalParse::run(room=4266328066, useChatRoom=1) returned true`, empty echo** — the handler accepted the injected line exactly like a typed one. Visual confirmation (line visible in guild chat / to a second account / relayed to Discord) recorded below.
 - Treat the room id as **per-session dynamic** until proven otherwise — one sample only; never hardcode it.
-- End-to-end confirmation: _pending — fill in after checking guild chat, a second account, and Discord._
+- **End-to-end confirmed (2026-08-05):** the injected line appeared in the sender's guild tab, was seen by a second player, and relayed to Discord through the Stage 1 capture. **S1 answered: `originalParse::run(text, echo, roomId, true)` sends plain text into the room through the game's own pipeline. The send path needs no further hunting.**
 
 ### S1/S2 spike instrumentation (built 2026-08-05)
 
@@ -120,7 +120,7 @@ Pass = each returned message has a non-empty `content` field, and webhook-posted
 
 ## Proposed build order
 
-1. **S1/S2 spike** (one in-game session + a debug subcommand): confirm the send mechanism and the guild room id source. This is the only genuine unknown — everything else is engineering.
+1. **S1/S2 spike** ✅ **Done 2026-08-05** — send mechanism confirmed end-to-end (see "S1/S2 spike findings"); guild room id comes from the parse-hook cache, filled by any line typed in the guild tab.
 2. **R1** — pin the claim contract, ship the stub.
 3. Extension poll/inject path against the stub, harness-tested, plus S4 limits from Core3 source.
 4. **R2** — bot + REST content verification.
