@@ -272,3 +272,8 @@ __pycache__/
 
 # Cake - Uncomment if you are using it
 # tools/
+
+# Discord bridge — live credentials, never commit.
+# Extension side: relay endpoint URL + X-Relay-Key, sits beside the DLL.
+DiscordBridge.ini
+# Relay side: see Relay/.gitignore for appsettings.Production.json etc.

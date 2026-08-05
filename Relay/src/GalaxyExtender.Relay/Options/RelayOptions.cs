@@ -1,0 +1,51 @@
+namespace GalaxyExtender.Relay.Options;
+
+/// <summary>
+/// Relay behaviour. Bound from the "Relay" configuration section.
+/// </summary>
+public sealed class RelayOptions
+{
+    public const string SectionName = "Relay";
+
+    /// <summary>
+    /// Reject non-HTTPS requests. Defaults to <c>false</c> so the Phase 0 deploy spike cannot
+    /// lock us out before we know what scheme IIS actually reports to the app. Flip to true
+    /// once <c>/api/v1/health</c> confirms <c>isHttps</c> is reported correctly on the host.
+    /// </summary>
+    public bool RequireHttps { get; set; }
+
+    /// <summary>
+    /// How long a message hash is remembered for de-duplication. Long enough to cover the
+    /// spread between guild members' clients posting the same line, short enough that it does
+    /// not interfere with the occurrence counter's job.
+    /// </summary>
+    public int DedupeWindowSeconds { get; set; } = 15;
+
+    /// <summary>How long a batchId is remembered, for retry idempotency.</summary>
+    public int BatchIdWindowSeconds { get; set; } = 300;
+
+    public int MaxLinesPerBatch { get; set; } = 50;
+
+    public int MaxLineLength { get; set; } = 512;
+
+    /// <summary>
+    /// The set of currently valid API keys, as <c>label -> secret</c>. The label is for the
+    /// operator's benefit only (it names the key in logs); it is NOT matched against the client id
+    /// in the request body, and clients never send it.
+    ///
+    /// Authentication is "does the presented <c>X-Relay-Key</c> equal any secret in here" — so the
+    /// normal setup is a SINGLE shared entry handed to everyone who should be allowed to relay:
+    /// <code>Relay__ApiKeys__guild = &lt;generated GUID&gt;</code>
+    /// No per-user entry is needed, and adding a guild member requires no config change.
+    ///
+    /// It is a collection rather than one string so keys can be ROTATED without a flag day: add
+    /// the replacement, distribute it while both are accepted, then delete the old one. That
+    /// matters because this secret lives in plaintext in DiscordBridge.ini on other people's
+    /// machines and will eventually leak. The same mechanism allows optional per-person keys later
+    /// if an individual needs revoking.
+    ///
+    /// Never place real keys in appsettings.json — see ConfigurationHygieneTests. Use user-secrets
+    /// locally and environment variables (or a git-ignored appsettings.Production.json) on the host.
+    /// </summary>
+    public Dictionary<string, string> ApiKeys { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+}

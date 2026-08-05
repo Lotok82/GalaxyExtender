@@ -1,0 +1,2 @@
+# App_Data holds runtime state (relay-state.json) and logs. Contents are git-ignored;
+# this file exists only so the folder is present in a fresh clone.
