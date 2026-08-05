@@ -24,6 +24,18 @@ public sealed class RelayOptions
     /// <summary>How long a batchId is remembered, for retry idempotency.</summary>
     public int BatchIdWindowSeconds { get; set; } = 300;
 
+    /// <summary>
+    /// Where the durable state document lives. Defaults to App_Data/relay-state.json under the
+    /// content root; overridable mainly so tests can isolate state per test host.
+    /// </summary>
+    public string? StateFilePath { get; set; }
+
+    /// <summary>Undelivered webhook payloads kept at most; beyond this the oldest is dropped.</summary>
+    public int OutboxMaxEntries { get; set; } = 200;
+
+    /// <summary>Delivery attempts before an outbox entry is dropped (with an error log).</summary>
+    public int OutboxMaxAttempts { get; set; } = 10;
+
     public int MaxLinesPerBatch { get; set; } = 50;
 
     public int MaxLineLength { get; set; } = 512;

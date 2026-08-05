@@ -20,5 +20,10 @@ public sealed class DiscordOptions
     /// </summary>
     public bool ShowContributingClient { get; set; }
 
-    public bool IsConfigured => !string.IsNullOrWhiteSpace(WebhookUrl);
+    /// <summary>
+    /// True only for a URL that could plausibly work. A typo'd value failing here shows up as
+    /// "not configured" on /health during setup, rather than as a failure at the first forward.
+    /// </summary>
+    public bool IsConfigured =>
+        Uri.TryCreate(WebhookUrl, UriKind.Absolute, out var url) && url.Scheme == Uri.UriSchemeHttps;
 }

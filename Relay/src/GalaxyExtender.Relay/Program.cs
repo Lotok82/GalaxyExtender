@@ -76,9 +76,23 @@ builder.Services.AddHttpClient("discord-probe", client =>
 builder.Services.AddSingleton<HostProbe>();
 builder.Services.AddSingleton<ApiKeyValidator>();
 
+// Forwarding pipeline (Phases 2-4): durable state, dedupe, sanitize, publish, outbox.
+builder.Services.AddSingleton<IStateStore, FileStateStore>();
+builder.Services.AddSingleton<DedupeService>();
+builder.Services.AddSingleton<DiscordPublisher>();
+builder.Services.AddSingleton<Outbox>();
+
+builder.Services.AddHttpClient(DiscordPublisher.HttpClientName, client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(10);
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("GalaxyExtenderRelay/0.2 (+https://github.com/Lotok82)");
+});
+
 // Rate limiting runs before authentication in the pipeline, so an unauthenticated flood is capped
-// too. Partitioned on a hash of the presented key — never the key itself — falling back to the
-// remote address when no key is supplied.
+// too. Partitioned on a hash of the key — never the key itself — but ONLY once the key has
+// validated: an unvalidated header would let an attacker rotate random keys and mint a fresh
+// permit bucket per request, defeating the cap this exists to provide. Anything else — no key,
+// unrecognised key — shares the caller's per-IP partition.
 builder.Services.AddRateLimiter(rateLimiter =>
 {
     rateLimiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -91,11 +105,13 @@ builder.Services.AddRateLimiter(rateLimiter =>
 
     rateLimiter.AddPolicy(ChatEndpoints.RateLimitPolicy, httpContext =>
     {
-        var presented = httpContext.Request.Headers[ApiKeyValidator.HeaderName].ToString();
+        var validation = httpContext.RequestServices
+            .GetRequiredService<ApiKeyValidator>()
+            .Validate(httpContext.Request);
 
-        var partition = string.IsNullOrEmpty(presented)
-            ? $"ip:{httpContext.Connection.RemoteIpAddress}"
-            : $"key:{ApiKeyValidator.Fingerprint(presented)}";
+        var partition = validation.IsValid
+            ? $"key:{ApiKeyValidator.Fingerprint(httpContext.Request.Headers[ApiKeyValidator.HeaderName].ToString())}"
+            : $"ip:{httpContext.Connection.RemoteIpAddress}";
 
         var permits = httpContext.RequestServices
             .GetRequiredService<IOptionsMonitor<RelayOptions>>()
@@ -112,61 +128,81 @@ builder.Services.AddRateLimiter(rateLimiter =>
 });
 
 // Reject oversize bodies before they are parsed. Set in both places: Kestrel for local dev,
-// IISServerOptions for in-process hosting on the host (web.config carries the IIS-level limit).
+// IISServerOptions for in-process hosting on the host. This is the authoritative 32 KB contract
+// limit and it answers with a clean 413; web.config's maxAllowedContentLength is a coarser
+// backstop set HIGHER than this, because IIS request filtering rejects with an opaque 404.13
+// that a client cannot diagnose.
 const long maxRequestBodyBytes = 32 * 1024;
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = maxRequestBodyBytes);
 builder.Services.Configure<IISServerOptions>(options => options.MaxRequestBodySize = maxRequestBodyBytes);
 
-var app = builder.Build();
-
-// ---------------------------------------------------------------------------
-// Pipeline
-// ---------------------------------------------------------------------------
-app.UseSerilogRequestLogging();
-
-if (!app.Environment.IsDevelopment())
+// Everything from Build() onward runs inside a catch: a malformed appsettings.Production.json or
+// a bad options value throws here, and without this the process dies before anything reaches the
+// Serilog file sink — producing exactly the undiagnosable 500.30 the logging section above exists
+// to prevent. HostAbortedException is the test host (WebApplicationFactory) taking over; not a
+// failure.
+try
 {
-    app.UseHsts();
-}
+    var app = builder.Build();
 
-// Opt-in rather than always-on: see RelayOptions.RequireHttps for why.
-var requireHttps = app.Services
-    .GetRequiredService<IOptions<RelayOptions>>()
-    .Value.RequireHttps;
+    // -----------------------------------------------------------------------
+    // Pipeline
+    // -----------------------------------------------------------------------
+    app.UseSerilogRequestLogging();
 
-if (requireHttps)
-{
-    app.Use(async (context, next) =>
+    if (!app.Environment.IsDevelopment())
     {
-        if (!context.Request.IsHttps)
+        app.UseHsts();
+    }
+
+    // Opt-in rather than always-on: see RelayOptions.RequireHttps for why.
+    var requireHttps = app.Services
+        .GetRequiredService<IOptions<RelayOptions>>()
+        .Value.RequireHttps;
+
+    if (requireHttps)
+    {
+        app.Use(async (context, next) =>
         {
-            context.Response.StatusCode = StatusCodes.Status403Forbidden;
-            await context.Response.WriteAsync("HTTPS required.");
-            return;
-        }
+            if (!context.Request.IsHttps)
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                await context.Response.WriteAsync("HTTPS required.");
+                return;
+            }
 
-        await next();
-    });
+            await next();
+        });
+    }
+
+    // Order matters: rate limiting before authentication, so an unauthenticated flood is capped
+    // before we spend anything on it; authentication before routing to endpoints, so untrusted JSON
+    // is never deserialised for a caller without a valid key.
+    app.UseRateLimiter();
+    app.UseMiddleware<ApiKeyAuthenticationMiddleware>();
+
+    // Plain-text root so that a browser hitting the site during the deploy spike gets an
+    // unambiguous "the app is running" rather than a 404 that could mean anything.
+    app.MapGet("/", () => Results.Text(
+        "GalaxyExtender Discord relay. See /api/v1/health", "text/plain"));
+
+    app.MapHealthEndpoints();
+    app.MapChatEndpoints();
+
+    Log.Information("Relay starting. pid={Pid} env={Environment} contentRoot={ContentRoot}",
+        Environment.ProcessId, app.Environment.EnvironmentName, app.Environment.ContentRootPath);
+
+    app.Run();
 }
-
-// Order matters: rate limiting before authentication, so an unauthenticated flood is capped
-// before we spend anything on it; authentication before routing to endpoints, so untrusted JSON
-// is never deserialised for a caller without a valid key.
-app.UseRateLimiter();
-app.UseMiddleware<ApiKeyAuthenticationMiddleware>();
-
-// Plain-text root so that a browser hitting the site during the deploy spike gets an
-// unambiguous "the app is running" rather than a 404 that could mean anything.
-app.MapGet("/", () => Results.Text(
-    "GalaxyExtender Discord relay. See /api/v1/health", "text/plain"));
-
-app.MapHealthEndpoints();
-app.MapChatEndpoints();
-
-Log.Information("Relay starting. pid={Pid} env={Environment} contentRoot={ContentRoot}",
-    Environment.ProcessId, app.Environment.EnvironmentName, app.Environment.ContentRootPath);
-
-app.Run();
+catch (Exception ex) when (ex is not HostAbortedException)
+{
+    Log.Fatal(ex, "Relay failed to start or terminated unexpectedly");
+    throw;
+}
+finally
+{
+    Log.CloseAndFlush();
+}
 
 /// <summary>
 /// Top-level statements generate an internal Program class, which WebApplicationFactory&lt;Program&gt;

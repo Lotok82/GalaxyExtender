@@ -75,12 +75,25 @@ public sealed class ChatEndpointAuthTests(RelayTestApp app) : IClassFixture<Rela
     }
 
     [Fact]
-    public async Task Health_endpoints_remain_unauthenticated()
+    public async Task Base_health_document_and_root_remain_unauthenticated()
     {
         var client = app.CreateClient();
 
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/v1/health")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/")).StatusCode);
+    }
+
+    /// <summary>
+    /// The outbound probe makes the shared host's IP call discord.com; anonymous hammering could
+    /// get that IP rate-limited or banned by Discord. It is an operator tool, so it demands the
+    /// key like everything else under /api.
+    /// </summary>
+    [Fact]
+    public async Task Outbound_health_probe_requires_a_key()
+    {
+        var response = await app.CreateClient().GetAsync("/api/v1/health/outbound");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     /// <summary>

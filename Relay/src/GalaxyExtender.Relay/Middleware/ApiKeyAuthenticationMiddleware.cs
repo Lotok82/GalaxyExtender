@@ -3,8 +3,10 @@ using GalaxyExtender.Relay.Services;
 namespace GalaxyExtender.Relay.Middleware;
 
 /// <summary>
-/// Requires a valid <c>X-Relay-Key</c> on everything under <c>/api/</c> except the health
-/// endpoints.
+/// Requires a valid <c>X-Relay-Key</c> on everything under <c>/api/</c> except the base health
+/// document. Health sub-endpoints (<c>/health/outbound</c>) stay behind the key: they perform
+/// outbound network calls on the caller's behalf, which makes them operator tools, not
+/// uptime-ping targets.
 ///
 /// Implemented as path-prefix middleware rather than a per-endpoint filter on purpose: it
 /// **fails closed**. Any endpoint added under the prefix later is protected automatically, whereas a
@@ -26,8 +28,7 @@ public sealed class ApiKeyAuthenticationMiddleware(
     {
         var path = context.Request.Path;
 
-        var requiresKey = path.StartsWithSegments(ProtectedPrefix)
-                          && !path.StartsWithSegments(HealthPrefix);
+        var requiresKey = path.StartsWithSegments(ProtectedPrefix) && !IsPublicHealthPath(path);
 
         if (!requiresKey)
         {
@@ -44,7 +45,7 @@ public sealed class ApiKeyAuthenticationMiddleware(
             logger.LogWarning(
                 "Rejected {Method} {Path}: {Reason}. keyFingerprint={Fingerprint}",
                 context.Request.Method,
-                path,
+                SanitizeForLog(path),
                 string.IsNullOrEmpty(presented) ? "no key presented" : "unrecognised key",
                 string.IsNullOrEmpty(presented) ? "none" : ApiKeyValidator.Fingerprint(presented));
 
@@ -55,5 +56,26 @@ public sealed class ApiKeyAuthenticationMiddleware(
         context.Items[KeyLabelItem] = result.Label;
 
         await next(context);
+    }
+
+    /// <summary>
+    /// Only the base health document is public — no secrets, and it is what an uptime pinger hits.
+    /// A trailing slash is tolerated; anything deeper requires the key.
+    /// </summary>
+    private static bool IsPublicHealthPath(PathString path) =>
+        path.StartsWithSegments(HealthPrefix, out var remaining) &&
+        (!remaining.HasValue || remaining.Value == "/");
+
+    /// <summary>
+    /// The request path is attacker-controlled and the file sink renders it verbatim, so strip
+    /// anything that could forge a log line before it is recorded.
+    /// </summary>
+    private static string SanitizeForLog(PathString path)
+    {
+        var value = path.Value ?? string.Empty;
+
+        return value.Any(c => c < 0x20 || c == 0x7F)
+            ? string.Concat(value.Select(c => c < 0x20 || c == 0x7F ? '?' : c))
+            : value;
     }
 }

@@ -12,9 +12,8 @@ public static class ChatEndpoints
     public const string RateLimitPolicy = "per-key";
 
     /// <summary>
-    /// Advertises that accepted lines are validated and counted but not yet forwarded to Discord.
-    /// A header rather than a response field so that turning forwarding on in Phase 3 is not a
-    /// breaking change to the payload the extension parses.
+    /// Advertises whether accepted lines reach Discord. A header rather than a response field so
+    /// that turning forwarding on was not a breaking change to the payload the extension parses.
     /// </summary>
     private const string ForwardingHeader = "X-Relay-Forwarding";
 
@@ -22,13 +21,18 @@ public static class ChatEndpoints
     {
         // Authentication is applied by ApiKeyAuthenticationMiddleware on the /api prefix, not here —
         // see that class for why it is path-based rather than per-endpoint.
-        app.MapPost("/api/v1/chat", (
+        app.MapPost("/api/v1/chat", async (
                 ChatBatchRequest? request,
                 HttpContext http,
-                IOptionsMonitor<RelayOptions> options,
-                ILogger<ChatBatch> logger) =>
+                IOptionsMonitor<RelayOptions> relayOptions,
+                IOptionsMonitor<DiscordOptions> discordOptions,
+                DedupeService dedupe,
+                DiscordPublisher publisher,
+                Outbox outbox,
+                ILogger<ChatBatch> logger,
+                CancellationToken cancellationToken) =>
             {
-                if (!ChatBatchValidator.TryValidate(request, options.CurrentValue, out var errors))
+                if (!ChatBatchValidator.TryValidate(request, relayOptions.CurrentValue, out var errors))
                 {
                     logger.LogInformation(
                         "Rejected batch from key={KeyLabel}: {ErrorCount} validation error(s): {Fields}",
@@ -41,28 +45,114 @@ public static class ChatEndpoints
 
                 // Validation guarantees these.
                 var batch = request!;
+                var batchId = batch.BatchId!;
                 var lines = batch.Lines!;
+                var clientId = batch.Client!.Id;
 
-                // Phase 1 stops here: no de-duplication (Phase 2), no Discord (Phase 3), no outbox
-                // (Phase 4). The endpoint exists now so the extension can be built and exercised
-                // against the real contract without anything being able to reach the channel.
+                if (!discordOptions.CurrentValue.IsConfigured)
+                {
+                    // Contract: 503 when the webhook is not configured. Deliberately BEFORE any
+                    // state mutation — an unconfigured relay must not eat lines into the dedupe
+                    // window it will never forward.
+                    return Results.Problem(
+                        title: "Discord webhook not configured on the relay.",
+                        statusCode: StatusCodes.Status503ServiceUnavailable);
+                }
+
+                // Opportunistic drain: anything a previous request failed to deliver goes first,
+                // preserving order as closely as this host allows.
+                await outbox.DrainAsync(cancellationToken);
+
+                // Dedupe on the normalised form; forward the display form. The key MUST come from
+                // the normalised text or two clients could disagree after presentation escaping.
+                var prepared = lines
+                    .Select(line =>
+                    {
+                        var normalized = TextSanitizer.Normalize(line.Text!);
+                        return (
+                            Key: DedupeService.Key(normalized, line.Occurrence!.Value),
+                            Display: TextSanitizer.ForDiscord(normalized, relayOptions.CurrentValue.MaxLineLength));
+                    })
+                    .ToList();
+
+                var admission = dedupe.Admit(batchId, clientId, prepared);
+
+                if (admission.ReplayedResponse is not null)
+                {
+                    logger.LogInformation("Replayed batch {BatchId} from key={KeyLabel} (client retry)",
+                        batchId, http.Items[ApiKeyAuthenticationMiddleware.KeyLabelItem]);
+
+                    http.Response.Headers[ForwardingHeader] = "enabled";
+                    return Results.Ok(admission.ReplayedResponse);
+                }
+
+                var accepted = 0;
+                var queued = 0;
+                int? retryAfterMs = null;
+
+                if (admission.UniqueLines.Count > 0)
+                {
+                    var chunks = TextSanitizer.BuildDescriptions(admission.UniqueLines);
+                    var failed = false;
+
+                    foreach (var (text, lineCount) in chunks)
+                    {
+                        var payload = publisher.BuildPayload(text, clientId);
+
+                        if (!failed)
+                        {
+                            var result = await publisher.PostAsync(payload, cancellationToken);
+
+                            if (result.Success)
+                            {
+                                accepted += lineCount;
+                                continue;
+                            }
+
+                            failed = true;
+
+                            if (result.RetryAfter is { } retryAfter)
+                            {
+                                // Pace the client too — the extension honours retryAfterMs.
+                                retryAfterMs = (int)Math.Min(retryAfter.TotalMilliseconds, 900_000);
+                            }
+                        }
+
+                        // First failure parks this and every later chunk, keeping order.
+                        outbox.Park(payload, lineCount,
+                            retryAfterMs is { } ms ? TimeSpan.FromMilliseconds(ms) : TimeSpan.FromSeconds(10));
+                        queued += lineCount;
+                    }
+                }
+
+                var response = new ChatBatchResponse(accepted, admission.Deduped, queued, retryAfterMs);
+                dedupe.Complete(batchId, response, forwardedSomething: accepted > 0);
+
                 logger.LogInformation(
-                    "Accepted batch {BatchId} from key={KeyLabel} client={ClientId} character={Character}: {LineCount} line(s)",
-                    batch.BatchId,
+                    "Batch {BatchId} from key={KeyLabel} client={ClientId} character={Character}: " +
+                    "{Accepted} forwarded, {Deduped} deduped, {Queued} queued",
+                    batchId,
                     http.Items[ApiKeyAuthenticationMiddleware.KeyLabelItem],
-                    batch.Client!.Id,
+                    clientId,
                     batch.Client.Character,
-                    lines.Count);
+                    accepted,
+                    admission.Deduped,
+                    queued);
 
-                http.Response.Headers[ForwardingHeader] = "disabled";
+                http.Response.Headers[ForwardingHeader] = "enabled";
 
-                return Results.Ok(new ChatBatchResponse(
-                    Accepted: lines.Count,
-                    Deduped: 0,
-                    Queued: 0,
-                    RetryAfterMs: null));
+                return Results.Ok(response);
             })
             .RequireRateLimiting(RateLimitPolicy);
+
+        // Authenticated no-op that drains the outbox and keeps the app pool warm. Cheap insurance
+        // given idle-stop: a cron/pinger POSTing here with the key both prevents cold starts and
+        // delivers anything a 429 parked when no chat followed it.
+        app.MapPost("/api/v1/heartbeat", async (Outbox outbox, CancellationToken cancellationToken) =>
+        {
+            await outbox.DrainAsync(cancellationToken);
+            return Results.Ok(new { outbox = outbox.Depth });
+        });
     }
 
     /// <summary>Log category marker for chat batch handling.</summary>

@@ -15,10 +15,14 @@ public static class HealthEndpoints
             HostProbe probe,
             IOptions<RelayOptions> relayOptions,
             IOptions<DiscordOptions> discordOptions,
+            IStateStore stateStore,
             HttpContext http) =>
         {
             var now = DateTimeOffset.UtcNow;
             var appData = probe.CheckAppData();
+
+            var (outboxDepth, dedupeEntries, lastForwardUtc) = stateStore.Read(state =>
+                (state.Outbox.Count, state.Dedupe.Count, state.LastForwardUtc));
 
             return Results.Ok(new
             {
@@ -69,13 +73,26 @@ public static class HealthEndpoints
                     discordConfigured = discordOptions.Value.IsConfigured
                 },
 
-                // Not run automatically — it is an outbound network call. GET /api/v1/health/outbound.
+                // Forwarding state. outboxDepth > 0 means undelivered lines are waiting for the
+                // next authenticated request (or heartbeat) to drain them.
+                relay = new
+                {
+                    outboxDepth,
+                    dedupeEntries,
+                    lastForwardUtc
+                },
+
+                // Not run automatically — it is an outbound network call, and it requires the
+                // relay key. GET /api/v1/health/outbound with X-Relay-Key.
                 outboundProbe = "/api/v1/health/outbound"
             });
         });
 
         // Separate endpoint so the cheap health check stays cheap and we do not hit Discord on
-        // every uptime ping.
+        // every uptime ping. Requires the relay key (enforced by ApiKeyAuthenticationMiddleware,
+        // which only exempts the base health document): every hit makes the shared host's IP call
+        // discord.com, and an anonymous hammering could get that IP rate-limited or banned by
+        // Discord — punishing every tenant and breaking Phase 3 forwarding.
         app.MapGet("/api/v1/health/outbound", async (HostProbe probe, CancellationToken cancellationToken) =>
         {
             var discord = await probe.CheckDiscordReachableAsync(cancellationToken);
