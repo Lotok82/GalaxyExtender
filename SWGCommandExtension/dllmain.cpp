@@ -12,7 +12,9 @@
 #include "SwgCuiLoginScreen.h"
 #include "SwgCuiCommandParserDefault.h"
 #include "SwgCuiMediatorFactorySetup.h"
+#include "SwgCuiChatWindowTab.h"
 #include "FoodDrinkMonitor.h"
+#include "DiscordBridge.h"
 
 using namespace std;
 
@@ -58,6 +60,11 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 	case DLL_PROCESS_ATTACH: {
 		DetourRestoreAfterWith();
 
+		// Only creates the bridge's lock and remembers the module handle (used
+		// to find DiscordBridge.ini beside the DLL). Config reads and the
+		// WinHTTP worker start on the first frame, outside the loader lock.
+		DiscordBridge::initialize((HMODULE)hModule);
+
 		DetourTransactionBegin();
 		DetourUpdateThread(GetCurrentThread());
 
@@ -67,6 +74,7 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 		ATTACH_HOOK(TerrainObject::setLevelOfDetailThresholdHook);
 		ATTACH_HOOK(GroundScene::parseMessages);
 		ATTACH_HOOK(SwgCuiMediatorFactorySetup::install);
+		ATTACH_HOOK(SwgCuiChatWindowTab::appendText);
 
 		LONG errorCode = DetourTransactionCommit();
 
@@ -86,6 +94,7 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 	}
 	case DLL_PROCESS_DETACH:
 		FoodDrinkMonitor::shutdown();
+
 		DetourTransactionBegin();
 		DetourUpdateThread(GetCurrentThread());
 
@@ -94,8 +103,15 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 		DETACH_HOOK(TerrainObject::setHighLevelOfDetailThresholdHook);
 		DETACH_HOOK(TerrainObject::setLevelOfDetailThresholdHook);
 		DETACH_HOOK(GroundScene::parseMessages);
+		DETACH_HOOK(SwgCuiChatWindowTab::appendText);
 
 		DetourTransactionCommit();
+
+		// After the detach commit, so no new appendText call can enter the bridge
+		// while it tears down its lock. lpReserved is non-null when the process is
+		// exiting rather than being unloaded by FreeLibrary — in that case every
+		// other thread is already gone and nothing may be waited on or freed.
+		DiscordBridge::shutdown(lpReserved != nullptr);
 		break;
 	}
 
