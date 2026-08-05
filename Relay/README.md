@@ -7,7 +7,7 @@ this file is the operational reference and the wire contract the C++ side codes 
 - **Target:** `net8.0`, ASP.NET Core minimal API
 - **Host:** IIS shared hosting (Plesk), in-process (`AspNetCoreModuleV2`), dedicated app pool, 1 worker process
 - **Live at:** `https://mesanderson.co.uk/relay` — subfolder registered as an IIS application
-- **Status:** **Phase 0 of 7 complete** — scaffold + host probe, deployed and verified. `POST /api/v1/chat` is **not implemented yet** (Phase 1); only `/health`, `/health/outbound` and `/` respond today.
+- **Status:** **Phases 0–1 of 7 complete.** `POST /api/v1/chat` accepts, authenticates, validates and counts batches — it does **not** de-duplicate (Phase 2) or forward to Discord (Phase 3) yet, and advertises this with the response header `X-Relay-Forwarding: disabled`. 32 tests.
 
 Verified on the host 2026-08-05: .NET 8.0.29 / Windows Server 2019, outbound to discord.com reachable (200 in 194 ms), `App_Data` writable, `process.id` stable across 4 minutes, `isHttps` reported correctly so `RequireHttps` is enabled.
 
@@ -134,8 +134,15 @@ uptime pings do not hit Discord.
 
 ## Wire contract (`/api/v1`)
 
-Auth on every endpoint except `/health*`: header `X-Relay-Key: <key>`, fixed-time compared against
-every configured secret (see [API keys](#api-keys)).
+Auth on everything under `/api/` except `/health*`: header `X-Relay-Key: <key>`, fixed-time compared
+against every configured secret (see [API keys](#api-keys)).
+
+Applied as path-prefix middleware rather than a per-endpoint filter, deliberately: it **fails
+closed**, so an endpoint added under `/api/` later is protected whether or not anyone remembers to
+attach a filter, and it runs before model binding so unauthenticated callers never get their JSON
+deserialised. Keys are compared as SHA-256 digests — `FixedTimeEquals` returns early on a length
+mismatch, which would leak the secret's length — and the loop over configured keys never
+short-circuits, so response time does not reveal which key matched.
 
 ### `POST /chat` — game → Discord
 
@@ -158,7 +165,21 @@ one. It is what lets a genuine repeat through while still collapsing the same li
 several guild members: every client watches the same stream, so they all label the first "lol" as
 `1` and the second as `2`. Without it a 15 s dedupe window silently eats real repeats.
 
-Status codes: `401` bad key · `413` oversize · `429` rate-limited (`Retry-After`) · `503` webhook not configured.
+Status codes: `400` contract violation (RFC 7807 body naming the offending field, e.g. `lines[1].text`) · `401` missing/bad key · `413` oversize · `429` rate-limited (`Retry-After`) · `503` webhook not configured (Phase 3+).
+
+Validation rules enforced today — a violation rejects the **whole batch** rather than silently dropping a line, because the extension is specified to enforce the same limits and anything out of bounds is a client bug worth surfacing:
+
+| Field | Rule |
+|---|---|
+| `batchId` | required, must parse as a GUID |
+| `client.id` | required, ≤ 64 chars |
+| `client.character`, `client.galaxy` | optional, ≤ 64 chars |
+| `lines` | 1 to `MaxLinesPerBatch` (50) |
+| `lines[].text` | required, non-blank, ≤ `MaxLineLength` (512) |
+| `lines[].occurrence` | required, ≥ 1 |
+| `lines[].clientSeq` | must not be negative |
+
+Rate limit: `RateLimitPermitsPerMinute` (120) per key per minute, fixed window, no queue — rejections get `429` with `Retry-After`. Partitioned on a hash of the presented key, never the key itself. `/health*` carries no policy, so diagnostics stay reachable while a client is throttled.
 
 ### `GET /messages?after=<cursor>&limit=50` — Stage 2 placeholder
 

@@ -1,7 +1,11 @@
+using System.Threading.RateLimiting;
 using GalaxyExtender.Relay.Endpoints;
+using GalaxyExtender.Relay.Middleware;
 using GalaxyExtender.Relay.Options;
 using GalaxyExtender.Relay.Services;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Options;
 using Serilog;
 using Serilog.Events;
 
@@ -70,6 +74,42 @@ builder.Services.AddHttpClient("discord-probe", client =>
 });
 
 builder.Services.AddSingleton<HostProbe>();
+builder.Services.AddSingleton<ApiKeyValidator>();
+
+// Rate limiting runs before authentication in the pipeline, so an unauthenticated flood is capped
+// too. Partitioned on a hash of the presented key — never the key itself — falling back to the
+// remote address when no key is supplied.
+builder.Services.AddRateLimiter(rateLimiter =>
+{
+    rateLimiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    rateLimiter.OnRejected = (context, _) =>
+    {
+        context.HttpContext.Response.Headers.RetryAfter = "60";
+        return ValueTask.CompletedTask;
+    };
+
+    rateLimiter.AddPolicy(ChatEndpoints.RateLimitPolicy, httpContext =>
+    {
+        var presented = httpContext.Request.Headers[ApiKeyValidator.HeaderName].ToString();
+
+        var partition = string.IsNullOrEmpty(presented)
+            ? $"ip:{httpContext.Connection.RemoteIpAddress}"
+            : $"key:{ApiKeyValidator.Fingerprint(presented)}";
+
+        var permits = httpContext.RequestServices
+            .GetRequiredService<IOptionsMonitor<RelayOptions>>()
+            .CurrentValue.RateLimitPermitsPerMinute;
+
+        return RateLimitPartition.GetFixedWindowLimiter(partition, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = permits,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        });
+    });
+});
 
 // Reject oversize bodies before they are parsed. Set in both places: Kestrel for local dev,
 // IISServerOptions for in-process hosting on the host (web.config carries the IIS-level limit).
@@ -91,7 +131,7 @@ if (!app.Environment.IsDevelopment())
 
 // Opt-in rather than always-on: see RelayOptions.RequireHttps for why.
 var requireHttps = app.Services
-    .GetRequiredService<Microsoft.Extensions.Options.IOptions<RelayOptions>>()
+    .GetRequiredService<IOptions<RelayOptions>>()
     .Value.RequireHttps;
 
 if (requireHttps)
@@ -109,12 +149,19 @@ if (requireHttps)
     });
 }
 
+// Order matters: rate limiting before authentication, so an unauthenticated flood is capped
+// before we spend anything on it; authentication before routing to endpoints, so untrusted JSON
+// is never deserialised for a caller without a valid key.
+app.UseRateLimiter();
+app.UseMiddleware<ApiKeyAuthenticationMiddleware>();
+
 // Plain-text root so that a browser hitting the site during the deploy spike gets an
 // unambiguous "the app is running" rather than a 404 that could mean anything.
 app.MapGet("/", () => Results.Text(
     "GalaxyExtender Discord relay. See /api/v1/health", "text/plain"));
 
 app.MapHealthEndpoints();
+app.MapChatEndpoints();
 
 Log.Information("Relay starting. pid={Pid} env={Environment} contentRoot={ContentRoot}",
     Environment.ProcessId, app.Environment.EnvironmentName, app.Environment.ContentRootPath);

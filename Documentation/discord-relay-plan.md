@@ -185,7 +185,7 @@ Minimal dependency set: framework only, plus `Serilog.AspNetCore` + `Serilog.Sin
 | # | Phase | Deliverable | Est. |
 |---|---|---|---|
 | 0 | Scaffold + **deploy spike** | ✅ **Done.** Solution, project, `web.config`, `/health` + `/health/outbound`, Serilog to `App_Data/logs`, 7 tests. Live on the host over HTTPS. Two defects found and fixed by doing this first: logging failure could kill startup (Serilog opens the file at `CreateLogger()`, outside the guard), and `StartedUtc` initialised lazily on first request so uptime was meaningless. | 1–2 h |
-| 1 | Contract + auth | DTOs, key validation, rate limiter, body/line limits, `POST /chat` returning counts without touching Discord. | 1–2 h |
+| 1 | Contract + auth | ✅ **Done.** DTOs, `ApiKeyValidator` (match-any, SHA-256 digests, non-short-circuiting), path-prefix auth middleware that fails closed, per-key fixed-window rate limiter, full contract validation, `POST /api/v1/chat` returning counts with `X-Relay-Forwarding: disabled`. 32 tests. | 1–2 h |
 | 2 | State + dedupe | `FileStateStore` w/ named mutex, atomic replace, pruning; `DedupeService` incl. `occurrence` logic and `batchId` idempotency. | 2–3 h |
 | 3 | Sanitize + publish | `TextSanitizer`, `DiscordPublisher`, embed build/split, `allowed_mentions` lockdown. First real message in Discord. | 2 h |
 | 4 | Outbox + 429 | Durable outbox, opportunistic drain, bounded in-request retry, `/heartbeat`. | 1–2 h |
@@ -199,9 +199,9 @@ Roughly **1.5–2 days**. Phases 0–3 are the minimum that puts guild chat in D
 
 ### Next actions (as of 2026-08-05)
 
-1. **Redeploy `Relay/publish/` to the host.** The live deployment is still running the pre-`eeb1ac8` binary — the startup-logging fix is not on it, so an `App_Data` permission change would produce another blind 500.30. (Config is current; only the DLLs are stale.)
-2. **Relay Phase 1** — contracts, key validation (match-any-key, non-short-circuiting fixed-time compare), rate limiter, body/line limits, `POST /api/v1/chat` returning accept/dedupe counts *without* touching Discord. Deliberately inert so the extension can exercise the full request path before anything can post to the channel.
-3. **Extension side** is tracked separately in [discord-bridge-plan.md](discord-bridge-plan.md) and has not been started. It can be built in parallel against the documented contract.
+1. **Redeploy `Relay/publish/` to the host** — it now carries Phase 1, so `POST /api/v1/chat` starts answering. Also picks up the startup-logging fix, without which an `App_Data` permission change gives another blind 500.30. Requires stopping the app so the DLL can be replaced.
+2. **Extension side** — [discord-bridge-plan.md](discord-bridge-plan.md), not started. The endpoint it needs now exists and validates, so it can be developed against the live relay with nothing able to reach the Discord channel.
+3. **Relay Phase 2** (de-duplication) — the state store, simplified by the single-worker-process finding. Until then `deduped` is always 0, so multiple relaying clients would produce duplicate *accepted* lines; harmless while forwarding is off.
 
 ### Test cases worth naming up front
 
