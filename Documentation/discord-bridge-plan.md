@@ -9,7 +9,7 @@ Last updated: 2026-08-05
 
 **What does not exist:** any extension-side code. No `DiscordBridge.*`, no chat hook, no `/emu discord` command. Nothing in the C++ project has been touched for this feature.
 
-**Relay state:** Phase 0 of 7 complete (scaffold + host probe, live over HTTPS). **Phase 1 — the `POST /api/v1/chat` contract and auth — is not built yet**, so the endpoint the extension needs does not accept traffic today. Either build relay Phase 1 first, or build the extension against the documented contract and test once Phase 1 lands.
+**Relay state:** Phases 0–1 of 7 complete. **`POST /api/v1/chat` exists and works** — it authenticates, validates the full contract and returns accept counts. It does not de-duplicate (Phase 2) or forward to Discord (Phase 3) yet, and says so via the response header `X-Relay-Forwarding: disabled`. That is ideal for extension development: you get real 401/400/429/200 responses from the live relay, with nothing able to reach the Discord channel while you iterate.
 
 **Two corrections to be aware of if reading this plan cold** — the detail sections below have been updated, but the change is easy to miss:
 

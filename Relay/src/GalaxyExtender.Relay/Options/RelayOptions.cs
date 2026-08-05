@@ -29,6 +29,15 @@ public sealed class RelayOptions
     public int MaxLineLength { get; set; } = 512;
 
     /// <summary>
+    /// Requests allowed per minute per key (or per IP when no key is presented). Abuse mitigation,
+    /// not accounting — the window resets on an app-pool recycle, which is acceptable.
+    ///
+    /// Sized against the client's ~1.5 s batch cadence (~40 requests/minute), with headroom for
+    /// retries and the Stage 2 poll.
+    /// </summary>
+    public int RateLimitPermitsPerMinute { get; set; } = 120;
+
+    /// <summary>
     /// The set of currently valid API keys, as <c>label -> secret</c>. The label is for the
     /// operator's benefit only (it names the key in logs); it is NOT matched against the client id
     /// in the request body, and clients never send it.
