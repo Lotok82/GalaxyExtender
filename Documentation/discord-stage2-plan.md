@@ -36,7 +36,17 @@ The typed-chat entry point is **already hooked**: `CuiChatParser::parse(const so
 | S1 | **Does plain text through `originalParse::run(text, result, roomId, true)` actually send to the room?** The hook comment says 0x9FF6F0 is the *last* handler (languages/moods) — plain-text room sends may happen in this function, or in a caller before it. | Add a debug log of `(chatRoomID, useChatRoom, text)` in the existing parse hook, type a line in the guild tab in-game, and see what arrives. Then add a hidden `/emu discord inject <text>` that replays via `originalParse::run` with the captured room id and check the message appears in guild chat (and reaches other players). One session answers both. |
 | S2 | **How do we get the guild room id without the player typing first?** Fork: `s_guildRoomId` static, set on login via `CuiChatRoomManager::setGuildRoomId`, read via `getGuildRoomId()` (fork `CuiChatRoomManager.cpp:2147`). | Preferred: hunt the static's data address (reuse `tools/` string-anchor scripts; `"GuildRoomId"`-ish strings or the setter's caller). Fallback that needs zero hunting: cache `chatRoomID` from the parse hook whenever the player types in the guild tab — but that means the injector can't inject until they've typed once per session, so treat it as a stopgap. S1's log output tells us what value to expect. |
 
-### S1/S2 spike instrumentation (built 2026-08-05, findings pending)
+### S1/S2 spike findings (session run 2026-08-05)
+
+From the live session (`/emu discord rooms` after typing in the guild tab, then inject):
+
+- **Plain guild-tab lines DO reach the 0x9FF6F0 hook**, with `chatRoomID` set and `useChatRoom=1` — observed value `4266328066` (`0xFE4B0002`). The room send path runs through this handler; **S3 (hunting a separate send function) looks unnecessary.**
+- **Slash commands typed in the guild tab arrive with the same room id and `useChatRoom=1`** (`/console` logged identically to plain lines). So the S2 stopgap cache populates from *any* line typed in the guild tab, commands included — e.g. running `/emu discord rooms` from the guild tab is itself enough to cache the id. The `s_guildRoomId` static hunt is only needed if requiring one typed line per session is deemed too much friction for injector clients.
+- **`/emu discord inject Test Text` → `originalParse::run(room=4266328066, useChatRoom=1) returned true`, empty echo** — the handler accepted the injected line exactly like a typed one. Visual confirmation (line visible in guild chat / to a second account / relayed to Discord) recorded below.
+- Treat the room id as **per-session dynamic** until proven otherwise — one sample only; never hardcode it.
+- End-to-end confirmation: _pending — fill in after checking guild chat, a second account, and Discord._
+
+### S1/S2 spike instrumentation (built 2026-08-05)
 
 The instrumentation for both questions is in [CuiChatParser.h](../SWGCommandExtension/CuiChatParser.h)/[.cpp](../SWGCommandExtension/CuiChatParser.cpp), surfaced through `EmuCommandParser`:
 
@@ -44,7 +54,7 @@ The instrumentation for both questions is in [CuiChatParser.h](../SWGCommandExte
 - **S2 stopgap cache** — the most recent line with `useChatRoom == true` and a non-zero `chatRoomID` sets the cached room id (shown by `rooms`). Commands typed in a room tab may also populate it, depending on what the client passes — the session will tell.
 - **`/emu discord inject <text>`** (hidden, not in help) — replays `<text>` via `originalParse::run(text, echo, cachedRoomId, true)` and prints the return value and any echo text. No-op with a red message if nothing is cached yet.
 
-Session script: type a plain line in the guild tab → `/emu discord rooms` (note the room id / useChatRoom values and confirm the cache) → `/emu discord inject hello from the spike` → check the line appears in guild chat, ideally on a second account, and relays to Discord via the Stage 1 hook. Record the actual values and outcome here.
+Session script: type a plain line in the guild tab → `/emu discord rooms` (note the room id / useChatRoom values and confirm the cache) → `/emu discord inject hello from the spike` → check the line appears in guild chat, ideally on a second account, and relays to Discord via the Stage 1 hook. Findings recorded above.
 | S3 | **If S1 fails** (plain text isn't sent by this handler): find the real send function — `CuiChatRoomManager::sendPrelocalizedChat(roomId, text)` or equivalent — via a fresh address hunt. | Fork source first for signature + string anchors, then `tools/` scripts. Only if S1 fails. |
 | S4 | **Server-side constraints (Core3).** Message length limit, flood throttle (how many lines/sec before the server drops or kicks), whether `\#RRGGBB` colour escapes survive the round-trip (purple text — cosmetic, plain marker works either way), and what happens if the sender isn't in a guild. | Read `ChatManagerImplementation.cpp` in the Core3 source; verify empirically with the S1 test command. Sets the injection pacing (S6) and the relay-side length clamp (R5). |
 | S5 | **Threading.** `originalParse::run` must be called from the main thread. | Existing pattern: poll worker fills a locked queue, `GroundScene::parseMessages` frame tick drains it. Same as Stage 1's architecture, opposite direction. |
