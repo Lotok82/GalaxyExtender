@@ -51,6 +51,34 @@ public sealed class RelayOptions
     /// </summary>
     public int RateLimitPermitsPerMinute { get; set; } = 600;
 
+    // ------------------------------------------------------------------
+    // Stage 2 (Discord -> game) tunables. Code defaults are the contract
+    // values pinned in README.md; config-overridable mainly for tests.
+    // ------------------------------------------------------------------
+
+    /// <summary>Seconds an unacked claim stays invisible before redelivery to the next poller.</summary>
+    public int Stage2RedeliveryTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>Total claims per message: 1 initial delivery + 2 redeliveries, then dropped.</summary>
+    public int Stage2MaxDeliveries { get; set; } = 3;
+
+    /// <summary>Pending messages older than this are dropped (counted), not injected stale.</summary>
+    public int Stage2TtlSeconds { get; set; } = 300;
+
+    /// <summary>Pending queue size cap; beyond it the oldest entries are dropped (counted).</summary>
+    public int Stage2MaxPending { get; set; } = 50;
+
+    /// <summary>Messages handed to one poll — sized so a claimant injecting at ~1 line/s
+    /// finishes well inside the redelivery timeout.</summary>
+    public int Stage2MaxPerPoll { get; set; } = 5;
+
+    /// <summary>
+    /// How long a Discord fetch result is considered fresh. Polls inside the window skip the
+    /// Discord call entirely, keeping the Discord-facing request rate independent of player
+    /// count. In-memory only — a recycle just causes one early fetch.
+    /// </summary>
+    public double Stage2FetchCacheSeconds { get; set; } = 2.5;
+
     /// <summary>
     /// The set of currently valid API keys, as <c>label -> secret</c>. The label is for the
     /// operator's benefit only (it names the key in logs); it is NOT matched against the client id

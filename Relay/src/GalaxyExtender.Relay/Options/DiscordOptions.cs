@@ -10,6 +10,21 @@ public sealed class DiscordOptions
 
     public string? WebhookUrl { get; set; }
 
+    /// <summary>
+    /// Bot token for the Stage 2 read path (R3). Raw token, no "Bot " prefix — the reader adds
+    /// that itself. Live credential: git-ignored appsettings.Production.json only.
+    /// </summary>
+    public string? BotToken { get; set; }
+
+    /// <summary>Bridge channel id, as a string — snowflakes overflow JSON readers that guess int.</summary>
+    public string? ChannelId { get; set; }
+
+    /// <summary>
+    /// Operator kill switch for Stage 2. The config can be staged (token + channel present)
+    /// while this stays false; nothing is fetched and /messages keeps reporting "disabled".
+    /// </summary>
+    public bool Stage2Enabled { get; set; }
+
     /// <summary>Embed colour for game -> Discord lines. 0x2ECC71 green, per the bridge plan.</summary>
     public int EmbedColor { get; set; } = 3066993;
 
@@ -26,4 +41,15 @@ public sealed class DiscordOptions
     /// </summary>
     public bool IsConfigured =>
         Uri.TryCreate(WebhookUrl, UriKind.Absolute, out var url) && url.Scheme == Uri.UriSchemeHttps;
+
+    /// <summary>
+    /// The Stage 2 read path is live: enabled by the operator AND plausibly credentialed. The
+    /// same shape of check as <see cref="IsConfigured"/> — a malformed channel id reads as "not
+    /// configured" rather than failing at the first fetch.
+    /// </summary>
+    public bool IsStage2Configured =>
+        Stage2Enabled &&
+        !string.IsNullOrWhiteSpace(BotToken) &&
+        !string.IsNullOrWhiteSpace(ChannelId) &&
+        ChannelId.All(char.IsAsciiDigit);
 }

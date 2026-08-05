@@ -21,8 +21,13 @@ public static class HealthEndpoints
             var now = DateTimeOffset.UtcNow;
             var appData = probe.CheckAppData();
 
-            var (outboxDepth, dedupeEntries, lastForwardUtc) = stateStore.Read(state =>
-                (state.Outbox.Count, state.Dedupe.Count, state.LastForwardUtc));
+            var (outboxDepth, dedupeEntries, lastForwardUtc, stage2Pending, stage2Cursor) =
+                stateStore.Read(state => (
+                    state.Outbox.Count,
+                    state.Dedupe.Count,
+                    state.LastForwardUtc,
+                    state.Stage2Pending.Count,
+                    state.Stage2Cursor is not null));
 
             return Results.Ok(new
             {
@@ -70,7 +75,8 @@ public static class HealthEndpoints
                     requireHttps = relayOptions.Value.RequireHttps,
                     dedupeWindowSeconds = relayOptions.Value.DedupeWindowSeconds,
                     apiKeyCount = relayOptions.Value.ApiKeys.Count,
-                    discordConfigured = discordOptions.Value.IsConfigured
+                    discordConfigured = discordOptions.Value.IsConfigured,
+                    stage2Configured = discordOptions.Value.IsStage2Configured
                 },
 
                 // Forwarding state. outboxDepth > 0 means undelivered lines are waiting for the
@@ -79,7 +85,9 @@ public static class HealthEndpoints
                 {
                     outboxDepth,
                     dedupeEntries,
-                    lastForwardUtc
+                    lastForwardUtc,
+                    stage2Pending,
+                    stage2CursorInitialised = stage2Cursor
                 },
 
                 // Not run automatically — it is an outbound network call, and it requires the
