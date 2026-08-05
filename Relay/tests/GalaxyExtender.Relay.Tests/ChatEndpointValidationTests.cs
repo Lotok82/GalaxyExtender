@@ -7,13 +7,13 @@ namespace GalaxyExtender.Relay.Tests;
 public sealed class ChatEndpointValidationTests(RelayTestApp app) : IClassFixture<RelayTestApp>
 {
     [Fact]
-    public async Task Accepted_count_matches_line_count_and_forwarding_is_advertised_as_disabled()
+    public async Task Accepted_count_matches_line_count_and_forwarding_is_advertised_as_enabled()
     {
         var response = await app.CreateAuthenticatedClient()
             .PostAsJsonAsync("/api/v1/chat", ChatBatches.Valid("one", "two", "three"));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("disabled", response.Headers.GetValues("X-Relay-Forwarding").Single());
+        Assert.Equal("enabled", response.Headers.GetValues("X-Relay-Forwarding").Single());
 
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(3, body.GetProperty("accepted").GetInt32());
@@ -113,6 +113,63 @@ public sealed class ChatEndpointValidationTests(RelayTestApp app) : IClassFixtur
             .PostAsJsonAsync("/api/v1/chat", ChatBatches.WithLines([ChatBatches.Line("   ")]));
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    /// <summary>
+    /// System.Text.Json deserialises a `null` array element into a null ChatLine. That must be a
+    /// 400 naming the element, not a 500 — the contract says 5xx is retried with the same batchId,
+    /// which would turn one malformed batch into a poison message.
+    /// </summary>
+    [Fact]
+    public async Task Null_line_element_is_rejected_with_400_not_500()
+    {
+        var response = await app.CreateAuthenticatedClient()
+            .PostAsJsonAsync("/api/v1/chat", ChatBatches.WithLines([null!]));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("lines[0]", await response.Content.ReadAsStringAsync());
+    }
+
+    /// <summary>
+    /// The extension maps control characters to spaces before sending, so they only ever arrive
+    /// from a buggy or hostile client. Rejecting them keeps forged newlines out of the relay's
+    /// log lines and out of the Phase 3 Discord messages.
+    /// </summary>
+    [Theory]
+    [InlineData("hello\nworld")]
+    [InlineData("hello\u0001world")]
+    [InlineData("hello\u007Fworld")]
+    public async Task Control_characters_in_line_text_are_rejected(string text)
+    {
+        var response = await app.CreateAuthenticatedClient()
+            .PostAsJsonAsync("/api/v1/chat", ChatBatches.WithLines([ChatBatches.Line(text)]));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("lines[0].text", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("client.id", "kaelen\n[INF] forged log line")]
+    [InlineData("client.character", "Kaelen\r\nforged")]
+    [InlineData("client.galaxy", "Basilisk\tforged")]
+    public async Task Control_characters_in_identity_fields_are_rejected(string field, string value)
+    {
+        var payload = new
+        {
+            batchId = Guid.NewGuid().ToString(),
+            client = new
+            {
+                id = field == "client.id" ? value : "kaelen",
+                character = field == "client.character" ? value : "Kaelen",
+                galaxy = field == "client.galaxy" ? value : "Basilisk"
+            },
+            lines = new[] { ChatBatches.Line("hello") }
+        };
+
+        var response = await app.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat", payload);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains(field, await response.Content.ReadAsStringAsync());
     }
 
     /// <summary>

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 
 namespace GalaxyExtender.Relay.Tests;
@@ -89,6 +90,65 @@ public sealed class ConfigurationHygieneTests
         foreach (var fileName in MustBeGitIgnored)
         {
             Assert.Contains(fileName, gitignore, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// The text check above can be satisfied while a force-added (<c>git add -f</c>) copy stays
+    /// tracked, so also ask git itself — being untracked is the actual invariant. Passes silently
+    /// when git is unavailable (a source tarball); the text check still runs there.
+    /// </summary>
+    [Fact]
+    public void Config_files_that_may_hold_real_values_are_not_tracked_by_git()
+    {
+        foreach (var fileName in MustBeGitIgnored)
+        {
+            var relativePath = $"src/GalaxyExtender.Relay/{fileName}";
+            var tracked = GitListsFileAsTracked(RelayRoot().FullName, relativePath);
+
+            if (tracked is null)
+            {
+                return; // git not available or not a repository — nothing to assert
+            }
+
+            Assert.False(tracked,
+                $"{relativePath} is tracked by git despite the .gitignore rule (force-added?). " +
+                $"It may hold live credentials. Fix with: git rm --cached {relativePath}");
+        }
+    }
+
+    /// <summary>True/false when git answered; null when git could not be consulted.</summary>
+    private static bool? GitListsFileAsTracked(string workingDirectory, string relativePath)
+    {
+        try
+        {
+            var startInfo = new ProcessStartInfo("git", $"ls-files -- \"{relativePath}\"")
+            {
+                WorkingDirectory = workingDirectory,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return null;
+            }
+
+            var stdout = process.StandardOutput.ReadToEnd();
+            process.StandardError.ReadToEnd();
+
+            if (!process.WaitForExit(10_000) || process.ExitCode != 0)
+            {
+                return null;
+            }
+
+            return !string.IsNullOrWhiteSpace(stdout);
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 

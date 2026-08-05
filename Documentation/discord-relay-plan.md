@@ -1,6 +1,6 @@
 # Discord Relay — Implementation Plan (.NET 8)
 
-Status: **Phase 0 complete and LIVE on the host.** Ready for Phase 1.
+Status: **Phases 0–5 complete — de-duplication and Discord forwarding are implemented and tested (65 tests). The host still runs the Phase 1 build; redeploy `Relay/publish/` to turn forwarding on.** Remaining: Phase 6 (post-deploy verification) and Phase 7 (Stage 2 stubs).
 Last updated: 2026-08-05
 
 Deployed at `https://example.invalid/relay` (subfolder registered as an IIS application). Confirmed from `/api/v1/health` on 2026-08-05:
@@ -186,10 +186,10 @@ Minimal dependency set: framework only, plus `Serilog.AspNetCore` + `Serilog.Sin
 |---|---|---|---|
 | 0 | Scaffold + **deploy spike** | ✅ **Done.** Solution, project, `web.config`, `/health` + `/health/outbound`, Serilog to `App_Data/logs`, 7 tests. Live on the host over HTTPS. Two defects found and fixed by doing this first: logging failure could kill startup (Serilog opens the file at `CreateLogger()`, outside the guard), and `StartedUtc` initialised lazily on first request so uptime was meaningless. | 1–2 h |
 | 1 | Contract + auth | ✅ **Done.** DTOs, `ApiKeyValidator` (match-any, SHA-256 digests, non-short-circuiting), path-prefix auth middleware that fails closed, per-key fixed-window rate limiter, full contract validation, `POST /api/v1/chat` returning counts with `X-Relay-Forwarding: disabled`. 32 tests. | 1–2 h |
-| 2 | State + dedupe | `FileStateStore` w/ named mutex, atomic replace, pruning; `DedupeService` incl. `occurrence` logic and `batchId` idempotency. | 2–3 h |
-| 3 | Sanitize + publish | `TextSanitizer`, `DiscordPublisher`, embed build/split, `allowed_mentions` lockdown. First real message in Discord. | 2 h |
-| 4 | Outbox + 429 | Durable outbox, opportunistic drain, bounded in-request retry, `/heartbeat`. | 1–2 h |
-| 5 | Tests | xUnit + `WebApplicationFactory` with a fake Discord handler. | 2–3 h |
+| 2 | State + dedupe | ✅ **Done.** `FileStateStore` (in-process lock per the single-worker finding, atomic replace, pruning, corrupt-file recovery); `DedupeService` with `occurrence` keys and `batchId` idempotency. State survives a simulated recycle in tests. | 2–3 h |
+| 3 | Sanitize + publish | ✅ **Done.** `TextSanitizer` (normalise-for-hash vs display-for-Discord kept strictly separate), `DiscordPublisher`, embed split at 4096, `allowed_mentions: {parse: []}` + zero-width-joiner rewrite. Unconfigured webhook → `503` before any state mutation. | 2 h |
+| 4 | Outbox + 429 | ✅ **Done.** Durable outbox in the state file, opportunistic drain (chat POST + heartbeat, ≤5 entries/request, stop on first failure), one bounded ≤2 s in-request retry on 429, exponential backoff capped 300 s, drop after `OutboxMaxAttempts` with an error log. `POST /api/v1/heartbeat` returns outbox depth. | 1–2 h |
+| 5 | Tests | ✅ **Done.** 65 total. `FakeDiscordHandler` records payloads and scripts 429s; covers the named cases below plus sanitizer and state-store units. | 2–3 h |
 | 6 | Harden deploy | Prove survival across an app-pool recycle and across a redeploy (state file must not be wiped); confirm outbound HTTPS to discord.com; turn off `stdoutLogEnabled`. | 1–2 h |
 | 7 | Stage 2 stubs | `GET /messages` placeholder + cursor plumbing so the extension can be written against it. | 1 h |
 
@@ -197,11 +197,11 @@ Roughly **1.5–2 days**. Phases 0–3 are the minimum that puts guild chat in D
 
 **Phase 0 is a gate, not a formality.** The one assumption that can invalidate the whole plan is whether the host will run an ASP.NET Core 8 app at all, so a hello-world deploy happens before any relay logic is written. If it fails, the fallbacks (self-contained `win-x86` publish, then a .NET Framework 4.8 port) get chosen while nothing has been built on top of the wrong assumption.
 
-### Next actions (as of 2026-08-05)
+### Next actions (as of 2026-08-05, evening)
 
-1. **Redeploy `Relay/publish/` to the host** — it now carries Phase 1, so `POST /api/v1/chat` starts answering. Also picks up the startup-logging fix, without which an `App_Data` permission change gives another blind 500.30. Requires stopping the app so the DLL can be replaced.
-2. **Extension side** — [discord-bridge-plan.md](discord-bridge-plan.md), not started. The endpoint it needs now exists and validates, so it can be developed against the live relay with nothing able to reach the Discord channel.
-3. **Relay Phase 2** (de-duplication) — the state store, simplified by the single-worker-process finding. Until then `deduped` is always 0, so multiple relaying clients would produce duplicate *accepted* lines; harmless while forwarding is off.
+1. **Redeploy `Relay/publish/` to the host** — it now carries Phases 2–5 plus the code-review fixes. The host's `appsettings.Production.json` already holds the webhook, so **forwarding goes live the moment this is deployed**: the extension is already verified in-game, so guild chat should appear in Discord immediately. Requires stopping the app so the DLL can be replaced.
+2. **Phase 6 checks after that deploy**: post a guild line, see it in Discord; `/health` → `relay.lastForwardUtc` set and `relay.outboxDepth` 0; confirm `relay-state.json` appears in `App_Data` and survives a recycle; redeploy once more and confirm the state file is not wiped.
+3. **Phase 7** (Stage 2 `/messages` stub + cursor plumbing) — when Stage 2 work starts.
 
 ### Test cases worth naming up front
 
@@ -215,7 +215,7 @@ Roughly **1.5–2 days**. Phases 0–3 are the minimum that puts guild chat in D
 
 ## Hosting checklist (verify on the actual host before phase 6)
 
-Most of this is now **self-answering**: `GET /api/v1/health` and `/api/v1/health/outbound` were built in Phase 0 specifically to report it off the deployed instance. Deploy, then call `/health` twice a few minutes apart.
+Most of this is now **self-answering**: `GET /api/v1/health` and `/api/v1/health/outbound` were built in Phase 0 specifically to report it off the deployed instance. Deploy, then call `/health` twice a few minutes apart. Note `/health/outbound` requires the `X-Relay-Key` header (it makes the host call discord.com, so it is not left open to anonymous hammering); the base `/health` stays unauthenticated for uptime pings.
 
 | # | Question | How to check |
 |---|---|---|
