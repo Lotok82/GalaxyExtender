@@ -645,6 +645,7 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 			resultUnicode += L"  /emu discord status - state, relay host, queue depth, last HTTP result\n";
 			resultUnicode += L"  /emu discord test - queue a synthetic line\n";
 			resultUnicode += L"  /emu discord types - chat channel types seen so far (guild-channel check)\n";
+			resultUnicode += L"  /emu discord rooms - room ids seen for typed lines (Stage 2 send-path spike)\n";
 
 			return true;
 		}
@@ -674,6 +675,29 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 			std::string types;
 			DiscordBridge::appendChannelTypes(types);
 			resultUnicode += types.c_str();
+		} else if (subcmd == L"rooms") {
+			CuiChatParser::appendRoomLog(resultUnicode);
+		} else if (subcmd == L"inject") {
+			// Hidden S1 spike command (discord-stage2-plan.md): replay <text>
+			// through the original chat parser with the cached room id.
+			soe::unicode text;
+			auto marker = originalCommand.find(L"inject");
+
+			if (marker != soe::unicode::npos) {
+				auto textStart = marker + 6;
+
+				while (textStart < originalCommand.size() && originalCommand[textStart] == L' ')
+					++textStart;
+
+				if (textStart < originalCommand.size())
+					text = originalCommand.substr(textStart);
+			}
+
+			if (text.empty()) {
+				resultUnicode += L"Usage: /emu discord inject <text>";
+			} else {
+				CuiChatParser::injectChat(text, resultUnicode);
+			}
 		} else if (subcmd == L"test") {
 			DiscordBridge::enqueueTestLine();
 
@@ -724,6 +748,6 @@ void EmuCommandParser::showHelp(soe::unicode& resultUnicode) {
 	resultUnicode += L"/emu drink - Shows current Drink fill value with percentage.\n";
 	resultUnicode += L"/emu memscan - Memory scanning tools to discover PlayerObject field offsets.\n";
 	resultUnicode += L"/emu hover [value|reset] - Get/set vehicle hover height. No args shows current, 'reset' restores default.\n";
-	resultUnicode += L"/emu discord <on|off|status|test|types> - Guild chat bridge to Discord. Needs DiscordBridge.ini beside the DLL.\n";
+	resultUnicode += L"/emu discord <on|off|status|test|types|rooms> - Guild chat bridge to Discord. Needs DiscordBridge.ini beside the DLL.\n";
 	resultUnicode += L"/emu help - This command, which lists help info on available extension commands.\n";
 }
