@@ -66,6 +66,55 @@ public sealed class FileStateStoreTests : IDisposable
     }
 
     [Fact]
+    public void A_failed_persist_rolls_memory_back_to_the_last_durable_state()
+    {
+        var store = CreateStore();
+
+        store.Mutate<object?>(state =>
+        {
+            state.Stage2Cursor = "durable";
+            return null;
+        });
+
+        // Hold the state file open exclusively so the atomic replace must fail. (Windows reports
+        // this as UnauthorizedAccessException; the specific type is not what matters here.)
+        using (new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var thrown = Record.Exception(() => store.Mutate<object?>(state =>
+            {
+                state.Stage2Cursor = "never-made-it-to-disk";
+                return null;
+            }));
+
+            Assert.NotNull(thrown);
+        }
+
+        // The failed mutation must not linger in memory: the caller saw a 500 and will retry,
+        // and a retry against retained-but-not-durable state would be a silent no-op.
+        Assert.Equal("durable", store.Read(state => state.Stage2Cursor));
+    }
+
+    [Fact]
+    public void A_non_persisting_mutation_is_visible_in_memory_and_rides_the_next_persist()
+    {
+        var store = CreateStore();
+
+        store.Mutate<object?>(state =>
+        {
+            state.Stage2Cursor = "admitted";
+            return null;
+        }, persist: false);
+
+        Assert.Equal("admitted", store.Read(state => state.Stage2Cursor));
+        Assert.False(File.Exists(_path), "a non-persisting mutation must not touch the file");
+
+        // Any later persisting mutation writes the whole document, carrying it along.
+        store.Mutate<object?>(_ => null, persist: true);
+
+        Assert.Equal("admitted", CreateStore().Read(state => state.Stage2Cursor));
+    }
+
+    [Fact]
     public void A_missing_file_is_a_valid_empty_state()
     {
         Assert.Equal(0, CreateStore().Read(state => state.Batches.Count));

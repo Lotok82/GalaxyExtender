@@ -111,6 +111,10 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
 		// while it tears down its lock. lpReserved is non-null when the process is
 		// exiting rather than being unloaded by FreeLibrary — in that case every
 		// other thread is already gone and nothing may be waited on or freed.
+		// Note the bridge's worker thread PINS this module while it runs
+		// (DiscordBridge startWorker), so a FreeLibrary cannot reach this line
+		// while the worker is mid-request; the unload completes only after the
+		// worker releases the pin.
 		DiscordBridge::shutdown(lpReserved != nullptr);
 		break;
 	}

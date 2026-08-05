@@ -36,6 +36,13 @@ public sealed class DedupeService(IStateStore store, IOptionsMonitor<RelayOption
     /// One atomic pass: prune both windows, replay a known batchId, otherwise classify every line
     /// and record first-arrivals. Runs entirely inside a single state mutation so a concurrent
     /// batch from another client cannot interleave between check and record.
+    ///
+    /// Deliberately NOT persisted here (<c>persist: false</c>): if the admitted keys became durable
+    /// before the batch is delivered or parked, a crash in between would make the client's retry a
+    /// dedupe no-op — accepted=0, nothing forwarded, lines silently gone. The keys become durable
+    /// with the next persisting mutation: a Park, or <see cref="Complete"/>. Until then a recycle
+    /// forgets the admission, and the retry re-does the work — re-processing is the recoverable
+    /// failure; a durable admission with no delivery is not.
     /// </summary>
     public Admission Admit(
         string batchId,
@@ -77,12 +84,13 @@ public sealed class DedupeService(IStateStore store, IOptionsMonitor<RelayOption
             }
 
             return new Admission(null, unique, deduped);
-        });
+        }, persist: false);
     }
 
     /// <summary>
     /// Records the response produced for <paramref name="batchId"/> so a client retry replays it
-    /// instead of reprocessing, and stamps the last successful forward for /health.
+    /// instead of reprocessing, and stamps the last successful forward for /health. This is also
+    /// the persisting mutation that makes the batch's <see cref="Admit"/> keys durable.
     /// </summary>
     public void Complete(string batchId, ChatBatchResponse response, bool forwardedSomething)
     {
@@ -90,7 +98,23 @@ public sealed class DedupeService(IStateStore store, IOptionsMonitor<RelayOption
 
         store.Mutate<object?>(state =>
         {
-            state.Batches.Add(new BatchEntry { Id = batchId, SeenUtc = now, Response = response });
+            // A retry racing its still-running original can Complete the same batchId twice: the
+            // retry saw every line as a dedupe hit (accepted=0) while the original did the real
+            // work. Keep whichever record accounts for more lines so later retries replay the
+            // truthful response rather than the loser of the race.
+            var existing = state.Batches.FirstOrDefault(b =>
+                string.Equals(b.Id, batchId, StringComparison.OrdinalIgnoreCase));
+
+            if (existing is null)
+            {
+                state.Batches.Add(new BatchEntry { Id = batchId, SeenUtc = now, Response = response });
+            }
+            else if (existing.Response is null ||
+                     response.Accepted + response.Queued >
+                     existing.Response.Accepted + existing.Response.Queued)
+            {
+                existing.Response = response;
+            }
 
             if (forwardedSomething)
             {

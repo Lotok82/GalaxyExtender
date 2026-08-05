@@ -101,7 +101,13 @@ public static class ChatEndpoints
 
                         if (!failed)
                         {
-                            var result = await publisher.PostAsync(payload, cancellationToken);
+                            // Deliberately NOT the request token. Once the batch is admitted the
+                            // only safe exit is through Park/Complete below: an extension timeout
+                            // mid-POST must not abandon the batch half-processed (its retry would
+                            // see every line as a dedupe hit), and an abort after Discord accepted
+                            // must not park a payload that would then post twice. The webhook
+                            // client's own timeout bounds the wait.
+                            var result = await publisher.PostAsync(payload, CancellationToken.None);
 
                             if (result.Success)
                             {

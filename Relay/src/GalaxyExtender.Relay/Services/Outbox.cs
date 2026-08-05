@@ -20,6 +20,13 @@ public sealed class Outbox(
     /// <summary>Most entries attempted per drain, so no single request pays for a long backlog.</summary>
     private const int MaxDrainPerRequest = 5;
 
+    /// <summary>
+    /// How long a claimed entry is invisible to other drains. Long enough to cover the webhook
+    /// client's timeout plus its in-request 429 retry; short enough that a crash mid-POST only
+    /// delays redelivery, not loses it.
+    /// </summary>
+    private static readonly TimeSpan ClaimLease = TimeSpan.FromSeconds(60);
+
     public int Depth => store.Read(state => state.Outbox.Count);
 
     /// <summary>Parks a payload for a later request to deliver.</summary>
@@ -51,6 +58,11 @@ public sealed class Outbox(
     /// <summary>
     /// Attempts due entries oldest-first. Stops at the first failure — if Discord is refusing,
     /// hammering it with the rest of the backlog only makes the rate limit worse.
+    ///
+    /// <paramref name="cancellationToken"/> (the caller's request abort) only stops the drain from
+    /// STARTING another delivery. An in-flight POST deliberately runs on no token: an abort
+    /// mid-POST would both burn an attempt Discord never refused and — if Discord had already
+    /// accepted — redeliver a duplicate later. The webhook client's timeout bounds the wait.
     /// </summary>
     public async Task DrainAsync(CancellationToken cancellationToken)
     {
@@ -58,17 +70,44 @@ public sealed class Outbox(
 
         for (var drained = 0; drained < MaxDrainPerRequest; drained++)
         {
-            var now = DateTimeOffset.UtcNow;
-
-            var entry = store.Read(state =>
-                state.Outbox.FirstOrDefault(e => e.NotBeforeUtc <= now));
-
-            if (entry is null)
+            if (cancellationToken.IsCancellationRequested)
             {
                 return;
             }
 
-            var result = await publisher.PostAsync(entry.Payload, cancellationToken);
+            var now = DateTimeOffset.UtcNow;
+
+            // Cheap existence check first, so the every-request drain does not pay a state-file
+            // write when the outbox is idle (the common case).
+            if (!store.Read(state => state.Outbox.Any(e => e.NotBeforeUtc <= now)))
+            {
+                return;
+            }
+
+            // Claim under the store lock by pushing NotBeforeUtc past the lease: two requests
+            // draining concurrently would otherwise both read the same entry and double-post it.
+            // A crash mid-POST leaves the claim in place, so redelivery waits out the lease
+            // instead of being lost.
+            var entry = store.Mutate(state =>
+            {
+                var due = state.Outbox.FirstOrDefault(e => e.NotBeforeUtc <= now);
+
+                if (due is not null)
+                {
+                    due.NotBeforeUtc = now + ClaimLease;
+                }
+
+                return due is null ? null : new { due.Id, due.Payload, due.LineCount };
+            });
+
+            if (entry is null)
+            {
+                // Another request claimed it between our check and our claim; leave the
+                // backlog to that request.
+                return;
+            }
+
+            var result = await publisher.PostAsync(entry.Payload, CancellationToken.None);
 
             if (result.Success)
             {

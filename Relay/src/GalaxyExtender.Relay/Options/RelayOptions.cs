@@ -44,10 +44,12 @@ public sealed class RelayOptions
     /// Requests allowed per minute per key (or per IP when no key is presented). Abuse mitigation,
     /// not accounting — the window resets on an app-pool recycle, which is acceptable.
     ///
-    /// Sized against the client's ~1.5 s batch cadence (~40 requests/minute), with headroom for
-    /// retries and the Stage 2 poll.
+    /// Sized for the SHARED-key setup below: the partition is the key, so every guild member
+    /// draws from the same bucket. One client at the ~1.5 s batch cadence is ~40 requests/minute;
+    /// the default covers ~a dozen simultaneously chatty clients plus retries and the Stage 2
+    /// poll. If the guild outgrows it, raise this rather than assuming per-client budgets.
     /// </summary>
-    public int RateLimitPermitsPerMinute { get; set; } = 120;
+    public int RateLimitPermitsPerMinute { get; set; } = 600;
 
     /// <summary>
     /// The set of currently valid API keys, as <c>label -> secret</c>. The label is for the

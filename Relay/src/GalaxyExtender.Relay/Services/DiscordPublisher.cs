@@ -48,8 +48,10 @@ public sealed class DiscordPublisher(
         return JsonSerializer.Serialize(new WebhookPayload { Embeds = [embed] });
     }
 
-    /// <summary>Sends one payload. Never throws on HTTP-level failure — the caller decides
-    /// whether a failed payload is parked or dropped.</summary>
+    /// <summary>Sends one payload. NEVER throws — not on HTTP failure, not on cancellation —
+    /// because the caller's park/complete bookkeeping must always run; an escaped exception here
+    /// is what turns "Discord was slow" into silently lost lines (the batch is already admitted
+    /// to the dedupe window). The caller decides whether a failed payload is parked or dropped.</summary>
     public async Task<PublishResult> PostAsync(string payloadJson, CancellationToken cancellationToken)
     {
         var webhookUrl = options.CurrentValue.WebhookUrl;
@@ -60,47 +62,57 @@ public sealed class DiscordPublisher(
             return new PublishResult(false, null);
         }
 
-        for (var attempt = 0; ; attempt++)
+        try
         {
-            HttpResponseMessage response;
+            for (var attempt = 0; ; attempt++)
+            {
+                HttpResponseMessage response;
 
-            try
-            {
-                var client = httpClientFactory.CreateClient(HttpClientName);
-                using var content = new StringContent(payloadJson, Encoding.UTF8, "application/json");
-                response = await client.PostAsync(webhookUrl, content, cancellationToken);
-            }
-            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-            {
-                logger.LogWarning("Webhook POST failed: {Error}", ex.Message);
-                return new PublishResult(false, null);
-            }
-
-            using (response)
-            {
-                if (response.IsSuccessStatusCode)
+                try
                 {
-                    return PublishResult.Ok;
+                    var client = httpClientFactory.CreateClient(HttpClientName);
+                    using var content = new StringContent(payloadJson, Encoding.UTF8, "application/json");
+                    response = await client.PostAsync(webhookUrl, content, cancellationToken);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+                {
+                    logger.LogWarning("Webhook POST failed: {Error}", ex.Message);
+                    return new PublishResult(false, null);
                 }
 
-                if ((int)response.StatusCode == 429)
+                using (response)
                 {
-                    var retryAfter = await ReadRetryAfterAsync(response, cancellationToken);
-
-                    if (attempt == 0 && retryAfter <= MaxInRequestRetry)
+                    if (response.IsSuccessStatusCode)
                     {
-                        await Task.Delay(retryAfter, cancellationToken);
-                        continue;
+                        return PublishResult.Ok;
                     }
 
-                    logger.LogWarning("Webhook rate limited; retry_after={RetryAfter}s — parking payload",
-                        retryAfter.TotalSeconds);
-                    return new PublishResult(false, retryAfter);
-                }
+                    if ((int)response.StatusCode == 429)
+                    {
+                        var retryAfter = await ReadRetryAfterAsync(response, cancellationToken);
 
-                logger.LogWarning("Webhook POST rejected with HTTP {Status}", (int)response.StatusCode);
-                return new PublishResult(false, null);
+                        if (attempt == 0 && retryAfter <= MaxInRequestRetry)
+                        {
+                            await Task.Delay(retryAfter, cancellationToken);
+                            continue;
+                        }
+
+                        logger.LogWarning("Webhook rate limited; retry_after={RetryAfter}s — parking payload",
+                            retryAfter.TotalSeconds);
+                        return new PublishResult(false, retryAfter);
+                    }
+
+                    logger.LogWarning("Webhook POST rejected with HTTP {Status}", (int)response.StatusCode);
+                    return new PublishResult(false, null);
+                }
             }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException)
+        {
+            // Reachable through the 429 handling: reading retry_after or the in-request
+            // Task.Delay can be cancelled by the caller aborting mid-wait.
+            logger.LogWarning("Webhook POST abandoned during retry handling: {Error}", ex.Message);
+            return new PublishResult(false, null);
         }
     }
 

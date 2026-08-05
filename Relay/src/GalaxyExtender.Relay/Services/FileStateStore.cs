@@ -38,13 +38,35 @@ public sealed class FileStateStore : IStateStore
                 ?? Path.Combine(environment.ContentRootPath, "App_Data", "relay-state.json");
     }
 
-    public T Mutate<T>(Func<RelayState, T> action)
+    public T Mutate<T>(Func<RelayState, T> action) => Mutate(action, persist: true);
+
+    public T Mutate<T>(Func<RelayState, T> action, bool persist)
     {
         lock (_lock)
         {
             var state = LoadLocked();
             var result = action(state);
-            PersistLocked(state);
+
+            if (!persist)
+            {
+                return result;
+            }
+
+            try
+            {
+                PersistLocked(state);
+            }
+            catch
+            {
+                // Memory and disk have diverged: the mutation is in memory but not durable. Keeping
+                // the in-memory copy would be worse than it sounds — the caller sees a 500 and
+                // retries, and the retained mutation makes the retry a dedupe no-op, silently eating
+                // the lines. Dropping the cache re-reads the last durable state on the next access,
+                // so memory and disk agree and the retry re-does the work.
+                _state = null;
+                throw;
+            }
+
             return result;
         }
     }

@@ -128,11 +128,13 @@ builder.Services.AddRateLimiter(rateLimiter =>
 });
 
 // Reject oversize bodies before they are parsed. Set in both places: Kestrel for local dev,
-// IISServerOptions for in-process hosting on the host. This is the authoritative 32 KB contract
-// limit and it answers with a clean 413; web.config's maxAllowedContentLength is a coarser
-// backstop set HIGHER than this, because IIS request filtering rejects with an opaque 404.13
-// that a client cannot diagnose.
-const long maxRequestBodyBytes = 32 * 1024;
+// IISServerOptions for in-process hosting on the host. Sized from the validation contract, not
+// from the current extension: 50 lines x 512 UTF-16 chars is ~150 KB of UTF-8 JSON in the worst
+// (non-ASCII) case, and a batch that passes every documented rule must never die here with an
+// opaque 413. The extension still keeps its own bodies under 32 KB; this is the server ceiling.
+// web.config's maxAllowedContentLength is a coarser backstop set HIGHER than this, because IIS
+// request filtering rejects with an opaque 404.13 that a client cannot diagnose.
+const long maxRequestBodyBytes = 256 * 1024;
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = maxRequestBodyBytes);
 builder.Services.Configure<IISServerOptions>(options => options.MaxRequestBodySize = maxRequestBodyBytes);
 
