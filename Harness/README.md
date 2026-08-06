@@ -15,7 +15,7 @@ Two modes:
   poll/inject loop against a scripted local HTTP stub: claim gates (no room id / stale frame
   tick), two-message claim with paced injection, idle, 429 + Retry-After, 500 backoff,
   malformed 200, relay-reported drops, `X-Relay-Stage2: disabled`, 404 fault latch + recovery,
-  `/emu discord off` discarding claimed messages, 401 latch + recovery. 56 checks.
+  `/emu discord off` discarding claimed messages, 401 latch + recovery. 57 checks.
 
 - `stage2_harness.exe live <path-to-real-DiscordBridge.ini>` — copies the real ini beside the
   exe (deleted afterwards), polls the LIVE relay's `/messages` stub once and prints the bridge

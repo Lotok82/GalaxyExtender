@@ -330,7 +330,11 @@ static void testRewrite() {
 	CHECK(rewrites(L"Kaelen: [Discord] Bob: hi",
 		L"[Discord] Bob: hi"), "no tag, sender stripped");
 	CHECK(rewrites(L"\\#8888ff[GuildChat] \\#ffffffKaelen\\#.: [Discord] Bob: hi",
-		L"\\#8888ff[GuildChat] \\#ffffff[Discord] Bob: hi"), "colour escapes tolerated");
+		L"\\#8888ff[GuildChat] \\#ffffff\\#.[Discord] Bob: hi"),
+		"colour escapes tolerated and kept (colour state carries into the body)");
+	CHECK(rewrites(L"[GuildChat] Kaelen: \\#800080[Discord] Bob: hi\\#008000",
+		L"[GuildChat] \\#800080[Discord] Bob: hi\\#008000"),
+		"injected purple wrap survives the sender strip");
 	CHECK(rewrites(L"[GuildChat] Kae len: [Discord] Bob: hi",
 		L"[GuildChat] [Discord] Bob: hi"), "sender with space stripped");
 
@@ -406,8 +410,10 @@ static void testLiveLoop() {
 	CHECK(pumpUntilInjected(2, 15000), "two messages injected");
 
 	if (g_injected.size() >= 2) {
-		CHECK(g_injected[0].text == L"[Discord] Bob: hi there", "injected line 1 composed");
-		CHECK(g_injected[1].text == L"[Discord] Alice: caf\x00E9 time", "injected line 2 composed (UTF-8 -> UTF-16)");
+		CHECK(g_injected[0].text == L"\\#800080[Discord] Bob: hi there\\#008000",
+			"injected line 1 composed (purple wrap)");
+		CHECK(g_injected[1].text == L"\\#800080[Discord] Alice: caf\x00E9 time\\#008000",
+			"injected line 2 composed (UTF-8 -> UTF-16, purple wrap)");
 
 		ULONGLONG gap = g_injected[1].tick - g_injected[0].tick;
 		CHECK(gap >= 1000, "injection paced >= 1s");
