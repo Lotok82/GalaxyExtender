@@ -1,0 +1,311 @@
+# GalaxyExtender Discord Relay
+
+De-duplicating relay between the SWG command extension and Discord. Design, rationale and phase
+plan live in [../Documentation/discord-relay-plan.md](../Documentation/discord-relay-plan.md);
+this file is the operational reference and the wire contract the C++ side codes against.
+
+- **Target:** `net8.0`, ASP.NET Core minimal API
+- **Host:** IIS shared hosting (Plesk), in-process (`AspNetCoreModuleV2`), dedicated app pool, 1 worker process
+- **Live at:** `https://example.invalid/relay` — subfolder registered as an IIS application
+- **Status:** **All phases complete — forwarding AND the Stage 2 read path (R3–R7) are implemented.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` serves the pinned Stage 2 claim contract for real when `Discord:BotToken` + `Discord:ChannelId` + `Discord:Stage2Enabled` are configured (on-demand channel fetch, echo filter, sanitizer, claim/redelivery/ack store) and answers empty + `X-Relay-Stage2: disabled` otherwise. Marked lines (`[Discord] …` after the sender prefix) arriving on `/chat` are the Stage 2 delivery ack — matched exact-first-then-mask-tolerant, counted as `accepted`, and **never forwarded to Discord**. 143 tests. Remaining: Phase 6 (post-deploy hardening checks).
+
+Verified on the host 2026-08-05: .NET 8.0.29 / Windows Server 2019, outbound to discord.com reachable (200 in 194 ms), `App_Data` writable, `process.id` stable across 4 minutes, `isHttps` reported correctly so `RequireHttps` is enabled.
+
+## Layout
+
+```
+Relay/
+  global.json                        SDK pin (>= 8.0.0, no prereleases)
+  GalaxyExtender.Relay.sln
+  src/GalaxyExtender.Relay/
+    Program.cs                       pipeline, logging, limits
+    Endpoints/ChatEndpoints.cs       /chat forwarding flow + /heartbeat
+    Endpoints/HealthEndpoints.cs     /health and /health/outbound
+    Options/                         RelayOptions, DiscordOptions
+    Services/HostProbe.cs            host-capability probe
+    Services/FileStateStore.cs       durable state (dedupe/batches/outbox), atomic writes
+    Services/DedupeService.cs        occurrence-aware dedupe + batchId idempotency
+    Services/TextSanitizer.cs        normalise for hashing; escape/neutralise for Discord
+    Services/DiscordPublisher.cs     webhook POSTs, allowed_mentions lockdown, 429-aware
+    Services/Outbox.cs               parked payloads, opportunistic drain, backoff
+    App_Data/                        runtime state + logs (git-ignored contents)
+    web.config                       IIS in-process hosting
+  tests/GalaxyExtender.Relay.Tests/
+```
+
+## Build, test, run
+
+```bash
+cd Relay
+dotnet build
+dotnet test
+dotnet run --project src/GalaxyExtender.Relay --urls http://localhost:5199
+```
+
+Then `GET http://localhost:5199/api/v1/health`.
+
+Note: only the .NET 8 *runtime* is required to run. The 9.x SDK builds `net8.0` fine, so an 8.x SDK
+install is not needed — `global.json` allows any SDK >= 8.0.0.
+
+## Configuration
+
+Bound from the `Relay` and `Discord` sections. **Never put real values in `appsettings.json`.**
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Relay:RequireHttps` | `false` | Reject non-HTTPS. Off until `/health` confirms the host reports `isHttps` correctly — see below. |
+| `Relay:DedupeWindowSeconds` | `15` | How long a message hash is remembered. |
+| `Relay:BatchIdWindowSeconds` | `300` | Retry-idempotency window. |
+| `Relay:MaxLinesPerBatch` | `50` | Rejected above this. |
+| `Relay:MaxLineLength` | `512` | Per-line clamp. |
+| `Relay:ApiKeys` | `{}` | `label -> secret`. See [API keys](#api-keys). |
+| `Relay:StateFilePath` | `App_Data/relay-state.json` | Durable state document (dedupe window, batch ids, outbox). Overridable mainly for tests. |
+| `Relay:OutboxMaxEntries` | `200` | Undelivered payloads kept at most; oldest dropped beyond it. |
+| `Relay:OutboxMaxAttempts` | `10` | Delivery attempts before an outbox entry is dropped (error-logged). |
+| `Discord:WebhookUrl` | — | Live credential. Must be an absolute `https://` URL or the relay reports unconfigured and answers `503`. |
+| `Discord:EmbedColor` | `3066993` | `0x2ECC71` green. |
+| `Discord:ShowContributingClient` | `false` | Debug embed field naming the client that won the dedupe race. |
+| `Discord:BotToken` | — | Live credential for the Stage 2 read path. Raw token, no `Bot ` prefix. |
+| `Discord:ChannelId` | — | Bridge channel snowflake, as a string of digits. |
+| `Discord:Stage2Enabled` | `false` | Operator kill switch: Stage 2 reads happen only when this is true AND token + channel are set. |
+| `Relay:Stage2RedeliveryTimeoutSeconds` | `60` | Unacked claim redelivery timeout (contract value; override is for tests). |
+| `Relay:Stage2MaxDeliveries` | `3` | 1 initial delivery + 2 redeliveries, then dropped and counted. |
+| `Relay:Stage2TtlSeconds` | `300` | Pending messages older than this are dropped, not injected stale. |
+| `Relay:Stage2MaxPending` | `50` | Pending queue cap; oldest dropped (counted) beyond it. |
+| `Relay:Stage2MaxPerPoll` | `5` | Messages claimed per poll. |
+| `Relay:Stage2FetchCacheSeconds` | `2.5` | Discord fetch freshness window — polls inside it skip the Discord call. |
+| `Discord:CleanupEnabled` | `false` | Operator switch for the channel-history cleanup below. Off by default — deleting history must be an explicit decision, never a side effect of a deploy. |
+| `Relay:CleanupMaxAgeHours` | `5` | Bridge-channel messages older than this are deleted; pinned messages always survive. |
+| `Relay:CleanupIntervalMinutes` | `15` | Minimum time between cleanup sweeps. |
+| `Relay:CleanupMaxSingleDeletesPerSweep` | `5` | Per-message DELETE cap for the over-14-day tail that bulk-delete rejects (first run on an old channel only). |
+
+### Channel-history cleanup (R10)
+
+With `Discord:CleanupEnabled` true (and the bot token + channel configured), the relay deletes
+bridge-channel messages older than `CleanupMaxAgeHours`, keeping pinned ones. The channel is a
+live ticker, not an archive. Like everything else on this host it is request-driven: the sweep
+piggybacks on chat POSTs, heartbeats and Stage 2 polls, at most once per `CleanupIntervalMinutes`,
+claimed atomically through the durable `lastCleanupUtc` stamp (visible on `/health`). One sweep is
+one page read (≤100 messages) plus one bulk-delete; a bigger backlog self-heals across sweeps.
+Requires the bot to have **Manage Messages** and **Read Message History** in the channel. When
+nobody is online the sweep pauses with everything else — the heartbeat pinger covers that gap.
+
+Locally:
+
+```bash
+dotnet user-secrets --project src/GalaxyExtender.Relay set "Discord:WebhookUrl" "https://discord.com/api/webhooks/..."
+dotnet user-secrets --project src/GalaxyExtender.Relay set "Relay:ApiKeys:guild" "<generated-key>"
+```
+
+On the host, use environment variables (double underscore for nesting) so no credential lands in the
+deployed tree: `Discord__WebhookUrl`, `Relay__ApiKeys__guild`. If the control panel makes environment
+variables awkward, the fallback is a git-ignored `appsettings.Production.json` uploaded alongside the
+app — outside source control either way.
+
+## API keys
+
+Keys are **generated by you and handed out**. Nobody sends you a key, and no per-user setup is
+required. The normal configuration is a single shared entry:
+
+```
+Relay__ApiKeys__guild = 7f3a9c21-4e08-4b6d-9a17-2c8e5d0b1f44
+```
+
+Generate one with PowerShell:
+
+```powershell
+[guid]::NewGuid().ToString()
+```
+
+Give that value to anyone who should be allowed to relay guild chat; it goes in their
+`DiscordBridge.ini` and travels as the `X-Relay-Key` header. Authentication is simply "does the
+presented key match any configured secret" — the dictionary label (`guild` above) names the key in
+logs and is never sent by the client.
+
+**Why a set rather than one secret: rotation.** This key sits in plaintext in an ini file on other
+people's machines, so assume it leaks eventually. To roll it, add a second entry, distribute it while
+both are accepted, then delete the old one — no flag day where everyone breaks at once. The same
+mechanism supports per-person keys later (add `kaelen`, `tarn`, drop the shared one) if an individual
+ever needs revoking, but there is no reason to start that way.
+
+`client.id` / `client.character` in the request body are **self-reported labels** for logging and the
+optional debug embed field. They are not authentication and must not be trusted.
+
+## Deploying
+
+```bash
+dotnet publish src/GalaxyExtender.Relay -c Release -o publish
+```
+
+Upload the contents of `publish/` to the site root. Framework-dependent, ~18 files, needs the 8.0
+runtime present on the host. If the host turns out to lack the ASP.NET Core 8 hosting bundle, the
+fallback is a self-contained publish:
+
+```bash
+dotnet publish src/GalaxyExtender.Relay -c Release -r win-x86 --self-contained -o publish-sc
+```
+
+then point `web.config`'s `processPath` at `.\GalaxyExtender.Relay.exe` with empty `arguments`.
+
+## The host probe
+
+`GET /api/v1/health` is unauthenticated and doubles as the answer to the hosting questions the plan
+flagged as unverified. Call it **twice, a few minutes apart**, and read:
+
+| Field | What it tells you |
+|---|---|
+| `process.id` | Changes between calls → app-pool **recycle** or a **web garden** (`maxProcesses > 1`). A web garden is what forces the cross-process mutex on the state store; if the pid is stable, that can be simplified. |
+| `process.uptimeSeconds` | Resets to ~0 → the pool is idle-stopping. Tells you how aggressive it is. |
+| `process.framework` | Confirms which runtime the host actually loaded. |
+| `storage.appDataWritable` | `false` → de-duplication and the outbox cannot persist. Hard blocker; `appDataError` says why. |
+| `request.isHttps` / `forwardedProto` | Must be correct before setting `RequireHttps=true`, or the relay 403s every client. |
+| `config.discordConfigured` | Whether the webhook URL actually reached the app. |
+
+`GET /api/v1/health/outbound` separately confirms the app pool may reach `discord.com` over TLS
+(it probes Discord's unauthenticated gateway endpoint, so no credential is involved). Kept off the
+main health check so uptime pings do not hit Discord, and it **requires `X-Relay-Key`**: every hit
+makes the shared host's IP call discord.com, and anonymous hammering could get that IP rate-limited
+or banned by Discord — punishing every tenant on the host.
+
+## Wire contract (`/api/v1`)
+
+Auth on everything under `/api/` except the base `/health` document: header `X-Relay-Key: <key>`,
+fixed-time compared against every configured secret (see [API keys](#api-keys)). Health
+sub-endpoints such as `/health/outbound` DO require the key — they make outbound calls on the
+caller's behalf, which makes them operator tools rather than uptime-ping targets.
+
+Applied as path-prefix middleware rather than a per-endpoint filter, deliberately: it **fails
+closed**, so an endpoint added under `/api/` later is protected whether or not anyone remembers to
+attach a filter, and it runs before model binding so unauthenticated callers never get their JSON
+deserialised. Keys are compared as SHA-256 digests — `FixedTimeEquals` returns early on a length
+mismatch, which would leak the secret's length — and the loop over configured keys never
+short-circuits, so response time does not reveal which key matched.
+
+### `POST /chat` — game → Discord
+
+```jsonc
+{
+  "batchId": "8f2c...",            // GUID, stable across client retries → idempotency
+  "client":  { "id": "kaelen", "character": "Kaelen", "galaxy": "Basilisk" },
+  "lines": [
+    { "text": "Kaelen: anyone up for a Krayt run?", "occurrence": 1, "clientSeq": 412 }
+  ]
+}
+```
+
+```jsonc
+{ "accepted": 1, "deduped": 0, "queued": 0, "retryAfterMs": null }
+```
+
+Response semantics now that forwarding is live: `accepted` = unique lines posted to Discord in
+this request · `deduped` = lines collapsed as duplicates (an earlier client won) · `queued` =
+unique lines parked in the durable outbox because Discord refused (they are delivered by a later
+request or heartbeat) · `retryAfterMs` = set when Discord is rate-limiting and the client should
+slow its cadence. A retried `batchId` (see below) replays the original response verbatim.
+
+`occurrence` is how many times the client has seen this exact line in the last 60 s, including this
+one. It is what lets a genuine repeat through while still collapsing the same line arriving from
+several guild members: every client watches the same stream, so they all label the first "lol" as
+`1` and the second as `2`. Without it a 15 s dedupe window silently eats real repeats. The dedupe
+key is `sha256(normalised text)[..16] + ":" + occurrence`; the window is `DedupeWindowSeconds`,
+and a client retrying a timed-out POST with the **same `batchId`** is answered from a 5-minute
+idempotency window without posting anything twice.
+
+What reaches Discord: one green embed per batch (split above 4096 characters), with SWG escapes
+stripped, Discord markdown escaped, `@everyone`/`@here` neutralised with a zero-width joiner, and
+`allowed_mentions: {"parse": []}` on every POST — player-authored text can never ping anyone.
+
+Status codes: `400` contract violation (RFC 7807 body naming the offending field, e.g. `lines[1].text`) · `401` missing/bad key · `413` oversize · `429` rate-limited (`Retry-After`) · `503` webhook not configured.
+
+Validation rules enforced today — a violation rejects the **whole batch** rather than silently dropping a line, because the extension is specified to enforce the same limits and anything out of bounds is a client bug worth surfacing:
+
+| Field | Rule |
+|---|---|
+| `batchId` | required, must parse as a GUID |
+| `client.id` | required, ≤ 64 chars, no control characters |
+| `client.character`, `client.galaxy` | optional, ≤ 64 chars, no control characters |
+| `lines` | 1 to `MaxLinesPerBatch` (50), no `null` elements |
+| `lines[].text` | required, non-blank, ≤ `MaxLineLength` (512), no control characters |
+| `lines[].occurrence` | required, ≥ 1 |
+| `lines[].clientSeq` | must not be negative |
+
+Control characters (C0 and DEL) are rejected everywhere because the extension maps them to spaces
+before sending — anything carrying one is a buggy or hostile client, and rejecting them keeps
+forged newlines out of the relay's logs and out of the Phase 3 Discord messages.
+
+**Body limit: 32 KB on the wire.** This is part of the contract, separate from the per-line
+character limits — a maximum-legal batch of multi-byte or heavily escaped text can exceed it, so
+clients must budget bytes when assembling a batch (the extension does; see its
+`MAX_LINES_JSON_BYTES`). The app answers oversize bodies with `413`; web.config carries a higher
+64 KB backstop only because IIS request filtering rejects with an opaque `404.13`.
+
+Rate limit: `RateLimitPermitsPerMinute` (120) per key per minute, fixed window, no queue — rejections get `429` with `Retry-After`. Partitioned on a hash of the key — never the key itself — and only once the key has **validated**; missing or unrecognised keys share a per-IP partition, so rotating random keys cannot mint fresh permit buckets. `/health` carries no policy, so diagnostics stay reachable while a client is throttled.
+
+### `GET /messages?client=<id>` — Discord → game work queue (Stage 2)
+
+**This is a work-queue CONSUME, not a broadcast read.** A successful `200` marks every returned
+message as **claimed by this key+client**: no other poller receives it unless the claim expires.
+The claimant is expected to inject each message into the guild room as
+`[Discord] <author>: <text>`; the injected line re-entering the relay through the Stage 1 capture
+is the **delivery ack** (matched by the marker — see the Stage 2 plan's "Marker and echo rules").
+Ack matching is **exact first, then mask-tolerant** (same length, characters equal wherever the
+received character is not `*`) because the echoed line passes through each receiving client's
+profanity filter and can arrive masked. Marked lines count toward the batch's `accepted` and are
+never forwarded to Discord, matched or not.
+If no ack arrives within the **redelivery timeout of 60 s**, the message is handed to the next
+poller; after **2 redeliveries** it is dropped and counted in `dropped`. Delivery is therefore
+at-least-once — rare duplicates are accepted by design, silent loss is not.
+
+There is deliberately **no `after=<cursor>` parameter**: under claim semantics the relay owns the
+queue position, and a client cursor would fight redelivery (a redelivered message is by definition
+"before" a cursor the client has already advanced past). Unknown query parameters are ignored.
+
+```
+GET /api/v1/messages?client=kaelen
+X-Relay-Key: <key>
+```
+
+`client` is required: ≤ 64 chars, no control characters — same rules as `/chat`'s `client.id`. It
+attributes claims for redelivery accounting and logging; it is **not** authentication and is not
+trusted beyond that.
+
+```jsonc
+{
+  "messages": [
+    { "id": "1402691702617341952",          // Discord snowflake, unique, ascending
+      "author": "Bob",                       // display name, sanitized, clamped ≤ 32 chars
+      "text": "anyone on tonight?",          // sanitized, clamped (see below)
+      "timestampUtc": "2026-08-05T21:14:09+00:00" }
+  ],
+  "dropped": 0
+}
+```
+
+- Messages arrive **oldest first** (ascending id), at most **5 per poll** — sized so a claimant
+  injecting at the game-safe ~1 line/s finishes well inside the 60 s claim window.
+- `dropped` counts messages discarded since the last poll that reported them (TTL expiry — the
+  pending queue drops anything older than ~5 min when no client was online — or the redelivery
+  cap). Report-once: each loss is reported to exactly one poller, so the extension can surface
+  "N Discord messages were missed" without double counting.
+- `text` is pre-sanitized by the relay (R5: mentions/emoji resolved, newlines collapsed, SWG
+  escapes stripped — the Core3 server does not strip `\#` colour codes itself) and pre-clamped:
+  `author` ≤ 32 chars, `text` ≤ 200 chars, so the full injected line
+  `[Discord] <author>: <text>` is ≤ 244 chars. Core3 enforces **no** room-message length limit
+  (S4 finding), so this bound is ours: it mirrors the game's own 255-char spatial-chat
+  convention and keeps the re-captured line inside `/chat`'s 512-char `MaxLineLength`. The
+  client injects verbatim and never needs to truncate.
+- Header `X-Relay-Stage2: disabled` until the Discord read path (R3) is configured and enabled,
+  then `enabled`. An unconfigured Stage 2 still answers `200` with an empty list — deliberately
+  **not** `503`, so the extension's poll loop treats "bridge off" as the ordinary idle case
+  rather than an error worth backing off from.
+
+Status codes: `400` missing/invalid `client` (RFC 7807 body) · `401` missing/bad key · `429`
+rate-limited (`Retry-After`) — same per-key/per-IP partitions and the same
+`RateLimitPermitsPerMinute` budget as `/chat`, so a client's polls and posts draw from one
+bucket.
+
+### `POST /heartbeat`
+
+Authenticated. Drains the outbox and keeps the app pool warm; returns `{ "outbox": <depth> }`.
+Pointing a pinger at it (with the key) both prevents cold starts and delivers anything a Discord
+rate limit parked when no chat followed it.

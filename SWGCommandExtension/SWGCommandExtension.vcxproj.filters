@@ -183,6 +183,12 @@
     <ClInclude Include="FoodDrinkMonitor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="DiscordBridge.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SwgCuiChatWindowTab.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="CustomizationData.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -240,6 +246,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="FoodDrinkMonitor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DiscordBridge.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
