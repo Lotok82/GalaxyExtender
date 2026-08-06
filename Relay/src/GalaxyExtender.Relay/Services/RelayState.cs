@@ -38,6 +38,13 @@ public sealed class RelayState
     /// Report-once: handed to exactly one poller and reset to zero.
     /// </summary>
     public int Stage2Dropped { get; set; }
+
+    /// <summary>
+    /// When the last channel-history cleanup sweep (R10) started, successful or not. The stamp
+    /// doubles as the sweep claim: it is advanced atomically under the store lock before any
+    /// Discord call, so concurrent requests cannot both pay for a sweep.
+    /// </summary>
+    public DateTimeOffset? LastCleanupUtc { get; set; }
 }
 
 public sealed class DedupeEntry

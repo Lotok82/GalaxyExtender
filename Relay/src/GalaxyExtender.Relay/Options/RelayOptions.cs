@@ -79,6 +79,28 @@ public sealed class RelayOptions
     /// </summary>
     public double Stage2FetchCacheSeconds { get; set; } = 2.5;
 
+    // ------------------------------------------------------------------
+    // Channel-history cleanup (R10) tunables. Config-overridable mainly
+    // for tests; the code defaults are the intended behaviour.
+    // ------------------------------------------------------------------
+
+    /// <summary>Bridge-channel messages older than this are deleted (pinned ones preserved).</summary>
+    public int CleanupMaxAgeHours { get; set; } = 5;
+
+    /// <summary>
+    /// Minimum time between sweeps. The sweep piggybacks on request traffic (no background
+    /// timers on this host), so this is a floor, not a schedule: with nobody online the channel
+    /// simply stays untouched until the next authenticated request.
+    /// </summary>
+    public int CleanupIntervalMinutes { get; set; } = 15;
+
+    /// <summary>
+    /// Per-message DELETE calls allowed per sweep, for the over-14-day tail that bulk-delete
+    /// rejects. Bounded like the outbox drain so no single request pays for a long backlog;
+    /// only ever relevant on a first run against an old channel.
+    /// </summary>
+    public int CleanupMaxSingleDeletesPerSweep { get; set; } = 5;
+
     /// <summary>
     /// The set of currently valid API keys, as <c>label -> secret</c>. The label is for the
     /// operator's benefit only (it names the key in logs); it is NOT matched against the client id

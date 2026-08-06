@@ -25,6 +25,15 @@ public sealed class DiscordOptions
     /// </summary>
     public bool Stage2Enabled { get; set; }
 
+    /// <summary>
+    /// Operator switch for the channel-history cleanup (R10): bridge-channel messages older than
+    /// <see cref="RelayOptions.CleanupMaxAgeHours"/> are deleted, pinned ones preserved. Off by
+    /// default DELIBERATELY — deleting history is destructive, so a redeploy alone must never
+    /// start it; turning it on is an explicit config decision, same as <see cref="Stage2Enabled"/>.
+    /// Needs the bot invited with Manage Messages.
+    /// </summary>
+    public bool CleanupEnabled { get; set; }
+
     /// <summary>Embed colour for game -> Discord lines. 0x2ECC71 green, per the bridge plan.</summary>
     public int EmbedColor { get; set; } = 3066993;
 
@@ -49,6 +58,16 @@ public sealed class DiscordOptions
     /// </summary>
     public bool IsStage2Configured =>
         Stage2Enabled &&
+        !string.IsNullOrWhiteSpace(BotToken) &&
+        !string.IsNullOrWhiteSpace(ChannelId) &&
+        ChannelId.All(char.IsAsciiDigit);
+
+    /// <summary>
+    /// The cleanup sweep is live: enabled AND plausibly credentialed. Deliberately independent of
+    /// <see cref="Stage2Enabled"/> — the channel wants tidying even while the read path is off.
+    /// </summary>
+    public bool IsCleanupConfigured =>
+        CleanupEnabled &&
         !string.IsNullOrWhiteSpace(BotToken) &&
         !string.IsNullOrWhiteSpace(ChannelId) &&
         ChannelId.All(char.IsAsciiDigit);

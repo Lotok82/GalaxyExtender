@@ -10,9 +10,11 @@ namespace GalaxyExtender.Relay.Tests;
 /// </summary>
 public sealed class FakeDiscordBotHandler : HttpMessageHandler
 {
+    public sealed record RecordedRequest(string Method, string Uri, string? Body);
+
     private readonly object _lock = new();
     private readonly Queue<Func<HttpResponseMessage>> _scripted = new();
-    private readonly List<string> _requestUris = [];
+    private readonly List<RecordedRequest> _requests = [];
 
     public IReadOnlyList<string> RequestUris
     {
@@ -20,7 +22,18 @@ public sealed class FakeDiscordBotHandler : HttpMessageHandler
         {
             lock (_lock)
             {
-                return _requestUris.ToArray();
+                return _requests.Select(r => r.Uri).ToArray();
+            }
+        }
+    }
+
+    public IReadOnlyList<RecordedRequest> Requests
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _requests.ToArray();
             }
         }
     }
@@ -31,7 +44,7 @@ public sealed class FakeDiscordBotHandler : HttpMessageHandler
         {
             lock (_lock)
             {
-                return _requestUris.Count;
+                return _requests.Count;
             }
         }
     }
@@ -55,21 +68,25 @@ public sealed class FakeDiscordBotHandler : HttpMessageHandler
         }
     }
 
-    protected override Task<HttpResponseMessage> SendAsync(
+    protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        // Read outside the lock; StringContent is buffered so this never actually blocks.
+        var body = request.Content is null
+            ? null
+            : await request.Content.ReadAsStringAsync(cancellationToken);
+
         lock (_lock)
         {
-            _requestUris.Add(request.RequestUri?.ToString() ?? string.Empty);
+            _requests.Add(new RecordedRequest(
+                request.Method.Method, request.RequestUri?.ToString() ?? string.Empty, body));
 
-            var response = _scripted.Count > 0
+            return _scripted.Count > 0
                 ? _scripted.Dequeue()()
                 : new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent("[]", Encoding.UTF8, "application/json")
                 };
-
-            return Task.FromResult(response);
         }
     }
 }

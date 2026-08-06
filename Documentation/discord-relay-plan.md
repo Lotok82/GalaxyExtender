@@ -202,7 +202,8 @@ Roughly **1.5–2 days**. Phases 0–3 are the minimum that puts guild chat in D
 1. ✅ ~~Redeploy `Relay/publish/`~~ — done; forwarding live 2026-08-05, Stage 2 read path live 2026-08-06.
 2. **Phase 6 checks** (still open): `/health` → `relay.lastForwardUtc` set and `relay.outboxDepth` 0; confirm `relay-state.json` survives an app-pool recycle; redeploy once more and confirm the state file is not wiped; turn off `stdoutLogEnabled`.
 3. ✅ ~~Phase 7~~ — done 2026-08-05 (stub), superseded by the real R3–R7 read path 2026-08-06.
-4. **R8** — poll-load sanity against the Plesk request quotas (every client polls at 5 s ≈ 17k req/day/player); **R9/R10** — optional bot posting + 5-hour channel history cleanup (see the Stage 2 plan).
+4. **R8** — poll-load sanity against the Plesk request quotas (every client polls at 5 s ≈ 17k req/day/player); **R9** — optional bot posting / webhook retirement (see the Stage 2 plan).
+5. ✅ ~~R10~~ — channel-history cleanup built 2026-08-06 (`ChannelCleaner`); goes live when `Discord:CleanupEnabled: true` is added to the host's `appsettings.Production.json` and `Relay/publish/` is redeployed. See README.md "Channel-history cleanup".
 
 ### Test cases worth naming up front
 

@@ -86,6 +86,9 @@ builder.Services.AddSingleton<Outbox>();
 builder.Services.AddSingleton<DiscordReader>();
 builder.Services.AddSingleton<Stage2Queue>();
 
+// Channel-history cleanup (R10): request-piggybacked sweep of the bridge channel.
+builder.Services.AddSingleton<ChannelCleaner>();
+
 builder.Services.AddHttpClient(DiscordPublisher.HttpClientName, client =>
 {
     client.Timeout = TimeSpan.FromSeconds(10);
