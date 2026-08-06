@@ -1,7 +1,7 @@
 # Discord Chat Bridge — Plan
 
-Status: **Stage 1 extension side is built and verified in-game. Relay Phases 2–5 (de-duplication + Discord forwarding) are implemented and tested — guild chat reaches Discord as soon as the relay is redeployed.** See [discord-relay-plan.md](discord-relay-plan.md) "Next actions".
-Last updated: 2026-08-05
+Status: **The full bridge is live in both directions (2026-08-06).** Stage 1 (game → Discord) confirmed end-to-end 2026-08-05; Stage 2 (Discord → game) confirmed end-to-end with multiple users 2026-08-06 — see [discord-stage2-plan.md](discord-stage2-plan.md). Remaining odds and ends are listed in [discord-relay-plan.md](discord-relay-plan.md) "Next actions".
+Last updated: 2026-08-06
 
 ## Start here (handoff)
 

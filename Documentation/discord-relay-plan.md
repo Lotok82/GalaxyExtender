@@ -1,6 +1,6 @@
 # Discord Relay — Implementation Plan (.NET 8)
 
-Status: **Phases 0–5 complete — de-duplication and Discord forwarding are implemented and tested (65 tests). The host still runs the Phase 1 build; redeploy `Relay/publish/` to turn forwarding on.** Remaining: Phase 6 (post-deploy verification) and Phase 7 (Stage 2 stubs).
+Status: **All phases built and deployed; the full bridge is live in both directions (2026-08-06).** Stage 1 forwarding (game → Discord) confirmed 2026-08-05; the Stage 2 read path (R3–R7, Discord → game, 143 tests) deployed and confirmed end-to-end with multiple users 2026-08-06 — see [discord-stage2-plan.md](discord-stage2-plan.md). Remaining here: the Phase 6 durability checks below (state file survives recycle/redeploy, `stdoutLogEnabled` off), R8 poll-load sanity, and the optional R9/R10 bot work from the Stage 2 plan.
 Last updated: 2026-08-05
 
 Deployed at `https://example.invalid/relay` (subfolder registered as an IIS application). Confirmed from `/api/v1/health` on 2026-08-05:
@@ -197,11 +197,12 @@ Roughly **1.5–2 days**. Phases 0–3 are the minimum that puts guild chat in D
 
 **Phase 0 is a gate, not a formality.** The one assumption that can invalidate the whole plan is whether the host will run an ASP.NET Core 8 app at all, so a hello-world deploy happens before any relay logic is written. If it fails, the fallbacks (self-contained `win-x86` publish, then a .NET Framework 4.8 port) get chosen while nothing has been built on top of the wrong assumption.
 
-### Next actions (as of 2026-08-05, evening)
+### Next actions (as of 2026-08-06)
 
-1. **Redeploy `Relay/publish/` to the host** — it now carries Phases 2–5 plus the code-review fixes. The host's `appsettings.Production.json` already holds the webhook, so **forwarding goes live the moment this is deployed**: the extension is already verified in-game, so guild chat should appear in Discord immediately. Requires stopping the app so the DLL can be replaced.
-2. **Phase 6 checks after that deploy**: post a guild line, see it in Discord; `/health` → `relay.lastForwardUtc` set and `relay.outboxDepth` 0; confirm `relay-state.json` appears in `App_Data` and survives a recycle; redeploy once more and confirm the state file is not wiped.
-3. **Phase 7** (Stage 2 `/messages` stub + cursor plumbing) — when Stage 2 work starts.
+1. ✅ ~~Redeploy `Relay/publish/`~~ — done; forwarding live 2026-08-05, Stage 2 read path live 2026-08-06.
+2. **Phase 6 checks** (still open): `/health` → `relay.lastForwardUtc` set and `relay.outboxDepth` 0; confirm `relay-state.json` survives an app-pool recycle; redeploy once more and confirm the state file is not wiped; turn off `stdoutLogEnabled`.
+3. ✅ ~~Phase 7~~ — done 2026-08-05 (stub), superseded by the real R3–R7 read path 2026-08-06.
+4. **R8** — poll-load sanity against the Plesk request quotas (every client polls at 5 s ≈ 17k req/day/player); **R9/R10** — optional bot posting + 5-hour channel history cleanup (see the Stage 2 plan).
 
 ### Test cases worth naming up front
 

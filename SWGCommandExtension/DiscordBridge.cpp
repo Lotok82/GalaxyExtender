@@ -61,6 +61,13 @@ const DWORD FRAME_STALE_MS = 3000;
 // inside the relay's 60 s claim window.
 const DWORD INJECT_INTERVAL_MS = 1100;
 
+// Injected lines render purple for every viewer, extension or not. Colour
+// state persists past the end of a line, so the suffix hands it back to
+// guild-chat green instead of leaving the tab purple. Applied AFTER the
+// defensive cleanChatText, which would strip these very escapes.
+const wchar_t INJECT_COLOUR_PREFIX[] = L"\\#800080";
+const wchar_t INJECT_COLOUR_SUFFIX[] = L"\\#008000";
+
 // A claim not injected within this long is let lapse locally: the relay
 // redelivers at 60 s, and injecting close to that line would race the
 // redelivery and double-post the message into the room.
@@ -1465,7 +1472,13 @@ void drainIncoming(ULONGLONG now) {
 	if (line.empty())
 		return;
 
-	bool sent = CuiChatParser::injectRoom(line.c_str(), line.size());
+	std::wstring wire;
+	wire.reserve(line.size() + 16);
+	wire += INJECT_COLOUR_PREFIX;
+	wire += line;
+	wire += INJECT_COLOUR_SUFFIX;
+
+	bool sent = CuiChatParser::injectRoom(wire.c_str(), wire.size());
 
 	std::string sample = narrowLossy(line);
 
@@ -2225,14 +2238,19 @@ bool DiscordBridge::rewriteMarkedLine(const wchar_t* in, size_t length, std::wst
 	// The segment between tag and marker, escapes removed, must be exactly a
 	// sender prefix: "Name: " — one colon at the end, nothing bracket-like.
 	// Anything else ("Kaelen: check this [Discord] thing") is a genuine chat
-	// line and stays untouched.
+	// line and stays untouched. The escapes themselves are kept: colour state
+	// carries forward into the rest of the line, so dropping them would render
+	// the body in the sender-name colour (and lose the injector's purple).
 	std::wstring plain;
 	plain.reserve(marker - senderBegin);
+
+	std::wstring keptEscapes;
 
 	for (size_t at = senderBegin; at < marker;) {
 		size_t escape = escapeLength(in, marker, at);
 
 		if (escape != 0) {
+			keptEscapes.append(in + at, in + at + escape);
 			at += escape;
 			continue;
 		}
@@ -2258,6 +2276,7 @@ bool DiscordBridge::rewriteMarkedLine(const wchar_t* in, size_t length, std::wst
 	}
 
 	out.assign(in, in + senderBegin);
+	out += keptEscapes;
 	out.append(in + marker, in + length);
 
 	return true;
