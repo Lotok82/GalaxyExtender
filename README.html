@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Discord Chat Bridge — Setup Guide</title>
+<style>
+  body {
+    font-family: "Segoe UI", Arial, sans-serif;
+    max-width: 760px;
+    margin: 2rem auto;
+    padding: 0 1.25rem;
+    line-height: 1.6;
+    color: #222;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.7rem; border-bottom: 2px solid #2ecc71; padding-bottom: .4rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; color: #1a6e3f; }
+  code, pre {
+    font-family: Consolas, monospace;
+    background: #f0f2f0;
+    border-radius: 4px;
+  }
+  code { padding: .1rem .35rem; }
+  pre { padding: .8rem 1rem; overflow-x: auto; border: 1px solid #dfe4df; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #d5d9d5; padding: .5rem .7rem; text-align: left; vertical-align: top; }
+  th { background: #eef6ef; }
+  .tip {
+    background: #eef6ef;
+    border-left: 4px solid #2ecc71;
+    padding: .7rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .warn {
+    background: #fdf3e7;
+    border-left: 4px solid #e67e22;
+    padding: .7rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 4px 4px 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>Discord Chat Bridge — Setup Guide</h1>
+
+<p>The bridge connects your guild chat in-game with a Discord channel, in both directions:
+guild chat shows up in Discord, and Discord messages show up in guild chat.</p>
+
+<p>There are two parts to set up:</p>
+<ol>
+  <li><strong>The relay</strong> — a small web service. Set up <em>once</em> by whoever runs the bridge (the "operator").</li>
+  <li><strong>The <code>DiscordBridge.ini</code> file</strong> — a small settings file that <em>each player</em> fills in.</li>
+</ol>
+
+<p>If you're a player and someone else already runs the relay, skip straight to
+<a href="#ini">Part 2</a> — all you need is the ini file and a key from the operator.</p>
+
+<h2 id="relay">Part 1 — Setting up the relay (operator only)</h2>
+
+<p>The relay's settings are given as <strong>environment variables</strong> on the server that hosts it
+(never typed into <code>appsettings.json</code>, because that file is shared publicly).
+These are the ones that matter:</p>
+
+<table>
+  <tr><th>Setting</th><th>What it is</th></tr>
+  <tr>
+    <td><code>Discord__WebhookUrl</code></td>
+    <td>The Discord webhook for your bridge channel. In Discord: channel settings →
+    <em>Integrations</em> → <em>Webhooks</em> → create one and copy its URL.
+    This is what sends guild chat <strong>into Discord</strong>.</td>
+  </tr>
+  <tr>
+    <td><code>Relay__ApiKeys__guild</code></td>
+    <td>A password you make up that lets players use the relay. Generate one in PowerShell with
+    <code>[guid]::NewGuid().ToString()</code>, then give it to your guild members —
+    it's the <code>key</code> they put in their ini file.</td>
+  </tr>
+  <tr>
+    <td><code>Discord__BotToken</code></td>
+    <td>A Discord bot's token. Needed for the <strong>Discord → game</strong> direction.
+    The bot must be in your server and able to read the bridge channel.</td>
+  </tr>
+  <tr>
+    <td><code>Discord__ChannelId</code></td>
+    <td>The ID number of the bridge channel (right-click the channel in Discord →
+    <em>Copy Channel ID</em>; you may need Developer Mode enabled in Discord's settings).</td>
+  </tr>
+  <tr>
+    <td><code>Discord__Stage2Enabled</code></td>
+    <td>Set to <code>true</code> to turn on the Discord → game direction.
+    Leave it off and the bridge is one-way (game → Discord only).</td>
+  </tr>
+</table>
+
+<div class="tip">
+  <strong>Optional — automatic tidy-up:</strong> set <code>Discord__CleanupEnabled</code> to
+  <code>true</code> and the relay deletes bridge-channel messages older than about 5 hours
+  (pinned messages are kept). The channel works like a live ticker rather than an archive.
+  The bot needs the <em>Manage Messages</em> and <em>Read Message History</em> permissions for this.
+</div>
+
+<p>To check everything is working, open
+<code>https://&lt;your-relay-address&gt;/api/v1/health</code> in a browser — it should show
+a page of status information, including whether the Discord webhook was picked up.</p>
+
+<h2 id="ini">Part 2 — Filling in DiscordBridge.ini (every player)</h2>
+
+<p>Put <code>DiscordBridge.ini</code> in the <strong>same folder as
+<code>SWGCommandExtension.dll</code></strong>. Only three settings are required:</p>
+
+<pre>[DiscordBridge]
+enabled=1
+endpoint=https://your-relay-address/relay
+key=paste-the-key-you-were-given-here</pre>
+
+<table>
+  <tr><th>Setting</th><th>What to put</th></tr>
+  <tr><td><code>enabled</code></td><td><code>1</code> to start the bridge automatically when the game loads, <code>0</code> to keep it off until you type <code>/emu discord on</code>.</td></tr>
+  <tr><td><code>endpoint</code></td><td>The relay's web address — the operator will tell you what it is.</td></tr>
+  <tr><td><code>key</code></td><td>The key handed out by the operator. The bridge does nothing while this is empty.</td></tr>
+</table>
+
+<p>There are also a few <strong>optional</strong> settings — <code>client_id</code>,
+<code>character</code> and <code>galaxy</code> — which just label you in the operator's logs.
+You can leave them blank.</p>
+
+<div class="warn">
+  <strong>Two things to be careful of:</strong>
+  <ul>
+    <li>Your <code>key</code> is like a password — don't post or share it.</li>
+    <li>Comments in the file (lines starting with <code>;</code>) must be on their own line.
+    Writing a note at the end of a setting line breaks that setting.</li>
+  </ul>
+</div>
+
+<h2>Handy in-game commands</h2>
+
+<table>
+  <tr><td><code>/emu discord on</code></td><td>Turns the bridge on (and re-reads the ini file, so edits apply without restarting the game).</td></tr>
+  <tr><td><code>/emu discord off</code></td><td>Turns the bridge off.</td></tr>
+  <tr><td><code>/emu discord status</code></td><td>Shows whether the bridge is running and tells you if something (like a missing key) is wrong.</td></tr>
+</table>
+
+</body>
+</html>
