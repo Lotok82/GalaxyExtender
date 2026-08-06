@@ -30,6 +30,7 @@ public static class ChatEndpoints
                 DiscordPublisher publisher,
                 Outbox outbox,
                 Stage2Queue stage2Queue,
+                ChannelCleaner cleaner,
                 ILogger<ChatBatch> logger,
                 CancellationToken cancellationToken) =>
             {
@@ -63,6 +64,9 @@ public static class ChatEndpoints
                 // Opportunistic drain: anything a previous request failed to deliver goes first,
                 // preserving order as closely as this host allows.
                 await outbox.DrainAsync(cancellationToken);
+
+                // Piggybacked channel cleanup (R10) — a no-op between sweeps.
+                await cleaner.SweepIfDueAsync(cancellationToken);
 
                 // Dedupe on the normalised form; forward the display form. The key MUST come from
                 // the normalised text or two clients could disagree after presentation escaping.
@@ -172,9 +176,11 @@ public static class ChatEndpoints
         // Authenticated no-op that drains the outbox and keeps the app pool warm. Cheap insurance
         // given idle-stop: a cron/pinger POSTing here with the key both prevents cold starts and
         // delivers anything a 429 parked when no chat followed it.
-        app.MapPost("/api/v1/heartbeat", async (Outbox outbox, CancellationToken cancellationToken) =>
+        app.MapPost("/api/v1/heartbeat", async (
+            Outbox outbox, ChannelCleaner cleaner, CancellationToken cancellationToken) =>
         {
             await outbox.DrainAsync(cancellationToken);
+            await cleaner.SweepIfDueAsync(cancellationToken);
             return Results.Ok(new { outbox = outbox.Depth });
         });
     }

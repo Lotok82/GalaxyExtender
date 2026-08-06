@@ -36,6 +36,7 @@ public static class MessagesEndpoints
                 DiscordReader reader,
                 Stage2Queue queue,
                 Outbox outbox,
+                ChannelCleaner cleaner,
                 CancellationToken cancellationToken) =>
             {
                 if (!TryValidateClient(client, out var errors))
@@ -54,7 +55,9 @@ public static class MessagesEndpoints
 
                 // Polls are the steadiest request stream this host sees; letting them drain the
                 // outbox gets parked game → Discord lines delivered even when nobody is chatting.
+                // The channel cleanup (R10) rides the same stream, a no-op between sweeps.
                 await outbox.DrainAsync(cancellationToken);
+                await cleaner.SweepIfDueAsync(cancellationToken);
 
                 await reader.FetchIfDueAsync(cancellationToken);
 

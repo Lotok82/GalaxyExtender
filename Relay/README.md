@@ -74,6 +74,21 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Relay:Stage2MaxPending` | `50` | Pending queue cap; oldest dropped (counted) beyond it. |
 | `Relay:Stage2MaxPerPoll` | `5` | Messages claimed per poll. |
 | `Relay:Stage2FetchCacheSeconds` | `2.5` | Discord fetch freshness window — polls inside it skip the Discord call. |
+| `Discord:CleanupEnabled` | `false` | Operator switch for the channel-history cleanup below. Off by default — deleting history must be an explicit decision, never a side effect of a deploy. |
+| `Relay:CleanupMaxAgeHours` | `5` | Bridge-channel messages older than this are deleted; pinned messages always survive. |
+| `Relay:CleanupIntervalMinutes` | `15` | Minimum time between cleanup sweeps. |
+| `Relay:CleanupMaxSingleDeletesPerSweep` | `5` | Per-message DELETE cap for the over-14-day tail that bulk-delete rejects (first run on an old channel only). |
+
+### Channel-history cleanup (R10)
+
+With `Discord:CleanupEnabled` true (and the bot token + channel configured), the relay deletes
+bridge-channel messages older than `CleanupMaxAgeHours`, keeping pinned ones. The channel is a
+live ticker, not an archive. Like everything else on this host it is request-driven: the sweep
+piggybacks on chat POSTs, heartbeats and Stage 2 polls, at most once per `CleanupIntervalMinutes`,
+claimed atomically through the durable `lastCleanupUtc` stamp (visible on `/health`). One sweep is
+one page read (≤100 messages) plus one bulk-delete; a bigger backlog self-heals across sweeps.
+Requires the bot to have **Manage Messages** and **Read Message History** in the channel. When
+nobody is online the sweep pauses with everything else — the heartbeat pinger covers that gap.
 
 Locally:
 
