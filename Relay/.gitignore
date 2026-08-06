@@ -1,0 +1,15 @@
+# Build output
+bin/
+obj/
+publish/
+*.user
+
+# Runtime state and logs — never commit these
+src/GalaxyExtender.Relay/App_Data/*
+!src/GalaxyExtender.Relay/App_Data/.gitkeep
+relay-state.json
+
+# Real configuration. The webhook URL and API keys are live credentials:
+# use `dotnet user-secrets` locally and environment variables on the host.
+appsettings.Production.json
+appsettings.Local.json

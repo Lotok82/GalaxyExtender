@@ -6,10 +6,16 @@
 #include "Graphics.h"
 #include "InputMap.h"
 #include "FoodDrinkMonitor.h"
+#include "DiscordBridge.h"
 
 void GroundScene::parseMessages(InputMap* map) {
 	// Update food/drink values on the net status UI panel
 	FoodDrinkMonitor::updateNetStatusUI();
+
+	// Drives the Discord bridge's frame counter (used to collapse the duplicate
+	// appendText calls one message produces when several tabs show guild chat)
+	// and performs its deferred first-use initialisation.
+	DiscordBridge::onFrame();
 
 	MessageQueue* queue = map->getMessageQueue();
 

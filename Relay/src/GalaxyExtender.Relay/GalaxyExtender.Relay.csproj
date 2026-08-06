@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AspNetCoreHostingModel>InProcess</AspNetCoreHostingModel>
+    <UserSecretsId>galaxyextender-relay</UserSecretsId>
+    <RootNamespace>GalaxyExtender.Relay</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- App_Data is created on the host; keep the folder in source control but never publish its contents. -->
+    <Content Remove="App_Data\**" />
+    <None Include="App_Data\.gitkeep" CopyToOutputDirectory="Never" />
+    <!-- Never ship the dev config to the host: it carries a dev API key, and Production would
+         ignore it anyway. Keeps the deployed tree free of anything that looks like a credential. -->
+    <Content Update="appsettings.Development.json" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Pinned to the 8.x line on purpose. `dotnet add package` resolves 10.0.0, which pulls
+      Microsoft.Extensions.* 10.x transitively — those would be deployed alongside a net8.0 app
+      onto a host that only has the 8.0 runtime. Keep this in step with the TargetFramework.
+    -->
+    <PackageReference Include="Serilog.AspNetCore" Version="8.0.3" />
+  </ItemGroup>
+
+</Project>
