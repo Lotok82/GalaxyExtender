@@ -89,6 +89,10 @@ builder.Services.AddSingleton<Stage2Queue>();
 // Channel-history cleanup (R10): request-piggybacked sweep of the bridge channel.
 builder.Services.AddSingleton<ChannelCleaner>();
 
+// Presence and bot commands (R11): who is running the extension, and the bot that reports it.
+builder.Services.AddSingleton<PresenceTracker>();
+builder.Services.AddSingleton<BotCommandScanner>();
+
 builder.Services.AddHttpClient(DiscordPublisher.HttpClientName, client =>
 {
     client.Timeout = TimeSpan.FromSeconds(10);
@@ -205,6 +209,7 @@ try
     app.MapHealthEndpoints();
     app.MapChatEndpoints();
     app.MapMessagesEndpoints();
+    app.MapPresenceEndpoints();
 
     Log.Information("Relay starting. pid={Pid} env={Environment} contentRoot={ContentRoot}",
         Environment.ProcessId, app.Environment.EnvironmentName, app.Environment.ContentRootPath);

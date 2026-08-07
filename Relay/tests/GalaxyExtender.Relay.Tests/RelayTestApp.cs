@@ -25,6 +25,14 @@ public class RelayTestApp : WebApplicationFactory<Program>
 
     public FakeDiscordHandler Discord { get; } = new();
 
+    /// <summary>
+    /// Per-test settings, applied after the defaults so they win. A protected hook rather than a
+    /// constructor parameter because several test classes take this host as an xUnit CLASS FIXTURE,
+    /// and xUnit rejects a fixture type with more than one public constructor — see
+    /// <see cref="ConfiguredRelayTestApp"/>.
+    /// </summary>
+    protected virtual Dictionary<string, string?>? ExtraConfiguration => null;
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment(Environments.Development);
@@ -44,6 +52,12 @@ public class RelayTestApp : WebApplicationFactory<Program>
                 // A plausible-but-fake URL: IsConfigured must pass, and the fake handler answers.
                 ["Discord:WebhookUrl"] = "https://discord.test/api/webhooks/1/not-a-real-webhook"
             });
+
+            // Added last so a test's own values win over the defaults above.
+            if (ExtraConfiguration is { } extra)
+            {
+                configuration.AddInMemoryCollection(extra);
+            }
         });
 
         builder.ConfigureServices(services =>

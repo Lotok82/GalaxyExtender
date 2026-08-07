@@ -94,7 +94,13 @@ public sealed class DiscordReader(
 
         var current = options.CurrentValue;
         var channelId = current.ChannelId!;
-        var cursor = store.Read(state => state.Stage2Cursor);
+        // Only suppress what something is actually going to answer. The discovered id is durable
+        // and outlives CommandsEnabled being switched back off, so without the gate a relay that
+        // once had commands on makes "@bot status" vanish from the guild room with nothing
+        // replying in Discord either.
+        var (cursor, botUserId) = store.Read(state => (
+            state.Stage2Cursor,
+            current.IsCommandsConfigured ? current.ConfiguredBotUserId ?? state.BotUserId : null));
 
         // First run: stamp "now" in message-id terms without queueing history.
         var url = cursor is null
@@ -129,11 +135,11 @@ public sealed class DiscordReader(
             return;
         }
 
-        List<FetchedMessage> fetched;
+        List<DiscordMessage> fetched;
 
         try
         {
-            fetched = ParseMessages(body);
+            fetched = DiscordMessageParser.Parse(body);
         }
         catch (JsonException ex)
         {
@@ -170,6 +176,16 @@ public sealed class DiscordReader(
             {
                 // R4, the echo filter: our webhook's posts (and any bot's) never re-enter.
                 if (message.FromBotOrWebhook)
+                {
+                    continue;
+                }
+
+                // R11: "@GalaxyExtender status" is addressed to the bot, not to the guild. The
+                // command scan answers it in Discord; injecting it into the guild room too would
+                // put half a conversation with a bot in front of players.
+                if (botUserId is not null &&
+                    BotCommands.Mentions(message, botUserId) &&
+                    BotCommands.Parse(message.Content) != BotCommands.BotCommand.None)
                 {
                     continue;
                 }
@@ -214,128 +230,4 @@ public sealed class DiscordReader(
             logger.LogInformation("Fetched {Enqueued} Discord message(s) into the Stage 2 queue", enqueued);
         }
     }
-
-    private sealed record FetchedMessage(
-        string Id,
-        ulong NumericId,
-        string? Content,
-        string? GlobalName,
-        string? Username,
-        bool FromBotOrWebhook,
-        bool HasAttachments,
-        bool HasEmbeds,
-        bool HasStickers,
-        DateTimeOffset TimestampUtc,
-        IReadOnlyDictionary<string, string> MentionNames);
-
-    private static List<FetchedMessage> ParseMessages(string json)
-    {
-        var messages = new List<FetchedMessage>();
-
-        using var document = JsonDocument.Parse(json);
-
-        if (document.RootElement.ValueKind != JsonValueKind.Array)
-        {
-            throw new JsonException("expected a message array");
-        }
-
-        foreach (var element in document.RootElement.EnumerateArray())
-        {
-            if (element.ValueKind != JsonValueKind.Object ||
-                !element.TryGetProperty("id", out var idProperty) ||
-                idProperty.ValueKind != JsonValueKind.String)
-            {
-                continue;
-            }
-
-            var id = idProperty.GetString()!;
-
-            if (!ulong.TryParse(id, out var numericId))
-            {
-                continue;
-            }
-
-            var fromBotOrWebhook = element.TryGetProperty("webhook_id", out _);
-            string? globalName = null;
-            string? username = null;
-
-            if (element.TryGetProperty("author", out var author) &&
-                author.ValueKind == JsonValueKind.Object)
-            {
-                if (author.TryGetProperty("bot", out var bot) && bot.ValueKind == JsonValueKind.True)
-                {
-                    fromBotOrWebhook = true;
-                }
-
-                if (author.TryGetProperty("global_name", out var g) && g.ValueKind == JsonValueKind.String)
-                {
-                    globalName = g.GetString();
-                }
-
-                if (author.TryGetProperty("username", out var u) && u.ValueKind == JsonValueKind.String)
-                {
-                    username = u.GetString();
-                }
-            }
-
-            var timestamp = DateTimeOffset.UtcNow;
-
-            if (element.TryGetProperty("timestamp", out var ts) &&
-                ts.ValueKind == JsonValueKind.String &&
-                DateTimeOffset.TryParse(ts.GetString(), out var parsed))
-            {
-                timestamp = parsed;
-            }
-
-            var mentionNames = new Dictionary<string, string>(StringComparer.Ordinal);
-
-            if (element.TryGetProperty("mentions", out var mentions) &&
-                mentions.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var mention in mentions.EnumerateArray())
-                {
-                    if (mention.ValueKind != JsonValueKind.Object ||
-                        !mention.TryGetProperty("id", out var mentionId) ||
-                        mentionId.ValueKind != JsonValueKind.String)
-                    {
-                        continue;
-                    }
-
-                    var name =
-                        mention.TryGetProperty("global_name", out var mg) &&
-                        mg.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(mg.GetString())
-                            ? mg.GetString()!
-                            : mention.TryGetProperty("username", out var mu) &&
-                              mu.ValueKind == JsonValueKind.String
-                                ? mu.GetString() ?? "someone"
-                                : "someone";
-
-                    mentionNames[mentionId.GetString()!] = name;
-                }
-            }
-
-            messages.Add(new FetchedMessage(
-                id,
-                numericId,
-                element.TryGetProperty("content", out var content) &&
-                content.ValueKind == JsonValueKind.String
-                    ? content.GetString()
-                    : null,
-                globalName,
-                username,
-                fromBotOrWebhook,
-                HasItems(element, "attachments"),
-                HasItems(element, "embeds"),
-                HasItems(element, "sticker_items"),
-                timestamp,
-                mentionNames));
-        }
-
-        return messages;
-    }
-
-    private static bool HasItems(JsonElement element, string property) =>
-        element.TryGetProperty(property, out var value) &&
-        value.ValueKind == JsonValueKind.Array &&
-        value.GetArrayLength() > 0;
 }

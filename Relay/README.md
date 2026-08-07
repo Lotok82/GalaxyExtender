@@ -7,7 +7,7 @@ this file is the operational reference and the wire contract the C++ side codes 
 - **Target:** `net8.0`, ASP.NET Core minimal API
 - **Host:** IIS shared hosting (Plesk), in-process (`AspNetCoreModuleV2`), dedicated app pool, 1 worker process
 - **Live at:** `https://mesanderson.co.uk/relay` — subfolder registered as an IIS application
-- **Status:** **All phases complete — forwarding AND the Stage 2 read path (R3–R7) are implemented.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` serves the pinned Stage 2 claim contract for real when `Discord:BotToken` + `Discord:ChannelId` + `Discord:Stage2Enabled` are configured (on-demand channel fetch, echo filter, sanitizer, claim/redelivery/ack store) and answers empty + `X-Relay-Stage2: disabled` otherwise. Marked lines (`[Discord] …` after the sender prefix) arriving on `/chat` are the Stage 2 delivery ack — matched exact-first-then-mask-tolerant, counted as `accepted`, and **never forwarded to Discord**. 143 tests. Remaining: Phase 6 (post-deploy hardening checks).
+- **Status:** **All phases complete — forwarding AND the Stage 2 read path (R3–R7) are implemented.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` serves the pinned Stage 2 claim contract for real when `Discord:BotToken` + `Discord:ChannelId` + `Discord:Stage2Enabled` are configured (on-demand channel fetch, echo filter, sanitizer, claim/redelivery/ack store) and answers empty + `X-Relay-Stage2: disabled` otherwise. Marked lines (`[Discord] …` after the sender prefix) arriving on `/chat` are the Stage 2 delivery ack — matched exact-first-then-mask-tolerant, counted as `accepted`, and **never forwarded to Discord**. `POST /api/v1/presence` records which extension clients are alive, and with `Discord:CommandsEnabled` the bot answers a `status` mention in the channel with how many clients are online (R11 — see [Bot commands and presence](#bot-commands-and-presence-r11)). 210 tests. Remaining: Phase 6 (post-deploy hardening checks).
 
 Verified on the host 2026-08-05: .NET 8.0.29 / Windows Server 2019, outbound to discord.com reachable (200 in 194 ms), `App_Data` writable, `process.id` stable across 4 minutes, `isHttps` reported correctly so `RequireHttps` is enabled.
 
@@ -20,6 +20,8 @@ Relay/
   src/GalaxyExtender.Relay/
     Program.cs                       pipeline, logging, limits
     Endpoints/ChatEndpoints.cs       /chat forwarding flow + /heartbeat
+    Endpoints/MessagesEndpoints.cs   /messages Stage 2 claim poll
+    Endpoints/PresenceEndpoints.cs   /presence check-in
     Endpoints/HealthEndpoints.cs     /health and /health/outbound
     Options/                         RelayOptions, DiscordOptions
     Services/HostProbe.cs            host-capability probe
@@ -28,6 +30,14 @@ Relay/
     Services/TextSanitizer.cs        normalise for hashing; escape/neutralise for Discord
     Services/DiscordPublisher.cs     webhook POSTs, allowed_mentions lockdown, 429-aware
     Services/Outbox.cs               parked payloads, opportunistic drain, backoff
+    Services/DiscordReader.cs        Stage 2 channel read, echo + command filter
+    Services/DiscordMessageParser.cs one Discord message shape, shared by reader and scanner
+    Services/Stage2Queue.cs          claim/redelivery/ack work queue
+    Services/ChannelCleaner.cs       request-piggybacked history sweep
+    Services/PresenceTracker.cs      who is running the extension (throttled writes)
+    Services/BotCommandScanner.cs    reads mentions, posts the bot's replies
+    Services/BotCommands.cs          what counts as a command
+    Services/StatusReport.cs         the wording the bot posts
     App_Data/                        runtime state + logs (git-ignored contents)
     web.config                       IIS in-process hosting
   tests/GalaxyExtender.Relay.Tests/
@@ -78,6 +88,16 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Relay:CleanupMaxAgeHours` | `5` | Bridge-channel messages older than this are deleted; pinned messages always survive. |
 | `Relay:CleanupIntervalMinutes` | `15` | Minimum time between cleanup sweeps. |
 | `Relay:CleanupMaxSingleDeletesPerSweep` | `5` | Per-message DELETE cap for the over-14-day tail that bulk-delete rejects (first run on an old channel only). |
+| `Discord:CommandsEnabled` | `false` | Operator switch for the bot commands below (`@bot status`). Off by default like the switches above — the relay starts posting messages of its own authorship when it goes on. Needs **Send Messages** + **Read Message History**. |
+| `Discord:BotUserId` | — | Override for the bot's own user id. Normally left empty: it is discovered once from `GET /users/@me` and cached in durable state. A *wrong* value here makes the bot deaf to every mention. |
+| `Relay:CommandScanIntervalSeconds` | `15` | Minimum time between channel scans for commands. A floor, not a schedule — see below. |
+| `Relay:CommandMaxAgeSeconds` | `300` | Mentions older than this get no reply. |
+| `Relay:CommandMaxRepliesPerScan` | `3` | Replies per scan; the excess is dropped, not deferred. |
+| `Relay:DeliveryNoticeIntervalMinutes` | `15` | Minimum gap between unprompted "nobody is online to receive this" notices, so a conversation held while the guild is offline is not annotated line by line. |
+| `Relay:PresenceOnlineWindowSeconds` | `180` | How recently a client must have checked in to count as online (the extension pings every 60 s). |
+| `Relay:PresenceWriteIntervalSeconds` | `30` | Minimum time between durable writes of one client's presence stamp. |
+| `Relay:PresenceRetentionDays` | `7` | How long a silent client still counts as "known" (the connected-count denominator). |
+| `Relay:PresenceMaxClients` | `200` | Hard cap on the presence roster. |
 
 ### Channel-history cleanup (R10)
 
@@ -89,6 +109,122 @@ claimed atomically through the durable `lastCleanupUtc` stamp (visible on `/heal
 one page read (≤100 messages) plus one bulk-delete; a bigger backlog self-heals across sweeps.
 Requires the bot to have **Manage Messages** and **Read Message History** in the channel. When
 nobody is online the sweep pauses with everything else — the heartbeat pinger covers that gap.
+
+### Bot commands and presence (R11)
+
+With `Discord:CommandsEnabled` true, mentioning the bot in the bridge channel answers questions
+about the bridge:
+
+```
+@YourBot status
+→ **Guild chat bridge: online** — 2 of 5 clients connected (checked in within the last 3 min).
+
+@YourBot status                              (with nobody playing)
+→ **Guild chat bridge: offline** — nobody has checked in within the last 3 min.
+  5 clients seen recently; last seen 2 h 11 min ago.
+```
+
+**Nothing here depends on what the bot is called.** A mention is matched by the bot's own user id —
+Discord puts `<@id>` on the wire, whatever name was typed — and that id is discovered from
+`GET /users/@me`, i.e. from the token. The replies name no bot and no product either: they describe
+the subject ("Guild chat bridge"), because the operator picks the application's name and can change
+it whenever, and Discord already renders the current name beside the reply. So renaming the bot,
+or running this under an entirely different name, needs no configuration and no code change.
+
+**The answer is a count, never a list of names.** The client labels it could have used are optional
+ini fields that the handed-out file ships blank on purpose (nobody should have to edit anything), so
+a name list would be empty or misleading — and a count means nothing a client says about itself can
+reach a message the relay itself authored. Any client connected reads as online; none reads as
+offline, with how long since the last one was seen, which is the useful part of a negative answer.
+
+`status` (also `online` / `who`) reports it; `help` and a bare mention get the one-line help;
+**anything else the bot is merely named in gets no reply at all** — it shares a channel with people,
+and a bot that answers everything becomes noise. Replies quote the command and carry
+`allowed_mentions: {"parse": []}`. A command is answered in Discord and **not** injected into the
+guild room.
+
+### Unprompted delivery notices
+
+The bot also speaks up **without being asked** when somebody posts ordinary chat that is not going to
+reach the guild room as posted — the case where saying nothing means the sender assumes it arrived.
+The two answers are different in kind, so they are worded as such:
+
+```
+Bob: anyone up for a Krayt run?
+→ **Guild chat bridge: offline** — nobody has checked in within the last 3 min (last seen 2 h 11 min ago).
+  This message is waiting, not lost: the first client to come online posts it into the guild room.
+  If nobody comes online within about 5 h, the channel tidy-up removes it undelivered.
+
+  (read path switched off instead)
+→ **Guild chat bridge: offline** — Discord → game delivery is switched off on the relay.
+  This message will not appear in the guild room, now or later.
+```
+
+The "waiting, not lost" promise is the truth about this design rather than optimism — see the TTL
+note under [`GET /messages`](#get-messagesclientid--discord--game-work-queue-stage-2): nothing is
+fetched while nobody polls, so nothing expires while the guild is empty. The tidy-up deadline is the
+one thing that can still lose the message, and it is stated only when `CleanupEnabled` is on. The
+last-line caveat the notice does *not* spell out: a backlog beyond the 50-message fetch and queue
+caps can still lose the oldest.
+
+Silence is the default everywhere else. The bot stays quiet when a client is online (the
+overwhelmingly common case), for messages that sanitize to nothing, for chat older than
+`CommandMaxAgeSeconds`, and for anything within `DeliveryNoticeIntervalMinutes` of the last notice —
+one notice tells everyone in the channel what they need to know. A `status` command and a notice are
+separate events; neither silences the other.
+
+**Operational catch:** with nobody in game the heartbeat pinger is the only thing driving the scan,
+so it must fire more often than `CommandMaxAgeSeconds` (5 min) or every message will already be too
+stale to answer by the time the relay looks. A pinger at 1–2 minutes is comfortable.
+
+There is no gateway connection, so "the bot listens" means the relay reads the channel on the back
+of authenticated request traffic — chat POSTs, presence pings, Stage 2 polls and `/heartbeat` — at
+most once per `CommandScanIntervalSeconds`, claimed atomically through the durable
+`lastCommandScanUtc` stamp. **With nobody in game, the heartbeat pinger's cadence is the bot's
+response time**, which is exactly the case that matters: "is it online?" gets asked when it looks
+like it isn't. The scan keeps its own cursor, independent of Stage 2's, so it works with the read
+path switched off; the first scan after enabling stamps that cursor and answers nothing, so turning
+the feature on never replies to mentions already in the channel. Replies are at-most-once — the
+cursor advances before anything is posted, because a missed answer is invisible and a duplicated one
+is spam.
+
+**"Connected" means an extension client was in touch inside `PresenceOnlineWindowSeconds`.** The
+relay never talks to the game server, so this is a statement about extension clients, not about the
+galaxy's population. "Known" is every client seen within `PresenceRetentionDays` — the closest
+available answer to "how many people have this installed", which is why the offline line words it as
+"seen recently" rather than as an install count. Both figures also appear on `/health`.
+
+Three signals feed it, and **the first two need nothing installed on the player's side** — which
+matters, because there is no update mechanism for the DLL and players replace it by hand:
+
+| Signal | Arrives when | Covers |
+|---|---|---|
+| `/chat` batch | somebody talks in guild chat | any relaying client |
+| `/messages` poll | every 5 s (60 s while Stage 2 reads are off) | a client in the ground scene with a cached guild room id |
+| `POST /presence` | every 60 s while in the world | everything, including a silent lurker — **new DLLs only** |
+
+The poll gate is the interesting one: a client only polls once the player has typed something in the
+guild tab this session (that is what caches the room id). So on the installed base, "connected"
+really means **"a client that can currently move traffic"** — and that is the honest reading for this
+bot's purpose, because a client that is not polling cannot receive an injection either. What the
+presence ping adds is the player who is in the world but has not typed in the guild tab: counted as
+connected once their client sends it. Until the DLL is widely updated, expect the count to be a
+floor, not a census.
+
+What separates one client from another is `client.id`. On an updated DLL that is unique by
+construction — a hash of the machine's Windows `MachineGuid` (hostname as fallback), with any
+`client_id` from the ini as a readable *prefix* rather than a replacement, so a pre-filled ini handed
+to the whole guild still counts everyone separately. On older DLLs it is the ini's `client_id`, or a
+hash of the computer name when that is blank, so the one thing that can collapse the count there is a
+literal value typed into the ini and copied to several people.
+
+Two consequences worth knowing. Two game clients on **one PC** share the fingerprint and count once
+(they are one person). And a client that updates to this build **changes id once** — which matters
+more than it sounds, because rollouts are manual and staggered, so the relay meets both forms for as
+long as anyone is still on an old DLL. Where the old id is a configured label the new id is that
+label plus the fingerprint, so the relay retires the old entry the moment the new one appears. Where
+it was blank the two ids are unrelated hashes and nothing can link them, so the stale entry only ages
+out — hence a retention window of days rather than the month it would otherwise want.
 
 Locally:
 
@@ -283,10 +419,17 @@ trusted beyond that.
 
 - Messages arrive **oldest first** (ascending id), at most **5 per poll** — sized so a claimant
   injecting at the game-safe ~1 line/s finishes well inside the 60 s claim window.
-- `dropped` counts messages discarded since the last poll that reported them (TTL expiry — the
-  pending queue drops anything older than ~5 min when no client was online — or the redelivery
-  cap). Report-once: each loss is reported to exactly one poller, so the extension can surface
-  "N Discord messages were missed" without double counting.
+- `dropped` counts messages discarded since the last poll that reported them (TTL expiry or the
+  redelivery cap). Report-once: each loss is reported to exactly one poller, so the extension can
+  surface "N Discord messages were missed" without double counting.
+- **The TTL runs from the moment the relay FETCHED a message, not from Discord's timestamp**, and
+  fetching only happens when a client polls. So an idle channel accumulates nothing that can
+  expire: a message posted while nobody is in game waits in Discord and is delivered to the first
+  client that comes online, however long that takes. TTL expiry therefore means "a client polled,
+  queueing this, and then stopped injecting for 5 minutes" — a claimant that quit or zoned out,
+  not an empty guild. (What *can* still lose a waiting message: the R10 channel tidy-up deleting
+  it from Discord first, or a backlog beyond the 50-message fetch/queue caps. The bot says so —
+  see [Bot commands and presence](#bot-commands-and-presence-r11).)
 - `text` is pre-sanitized by the relay (R5: mentions/emoji resolved, newlines collapsed, SWG
   escapes stripped — the Core3 server does not strip `\#` colour codes itself) and pre-clamped:
   `author` ≤ 32 chars, `text` ≤ 200 chars, so the full injected line
@@ -304,8 +447,46 @@ rate-limited (`Retry-After`) — same per-key/per-IP partitions and the same
 `RateLimitPermitsPerMinute` budget as `/chat`, so a client's polls and posts draw from one
 bucket.
 
+### `POST /presence` — "I am here"
+
+Authenticated. How the relay knows anyone is running the extension, and therefore what
+`@bot status` reports.
+
+```jsonc
+{ "client": { "id": "kaelen", "character": "Kaelen", "galaxy": "Basilisk" } }
+```
+
+```jsonc
+{ "online": 2, "known": 5, "onlineWindowSeconds": 180 }
+```
+
+`client` follows exactly the same rules as `/chat`'s (`id` required, ≤ 64 chars, no control
+characters; `400` names the offending field) and is equally self-reported — it is not
+authentication. **Only `id` is used**, as the thing that distinguishes one install from another;
+`character` and `galaxy` are accepted and ignored (the status answer is a count), so an older client
+that still sends them is fine and the relay stores no player labels.
+
+**This endpoint is an accuracy upgrade, not a prerequisite.** Presence is primarily derived from
+traffic the relay already receives — `/chat` and `/messages` refresh the same stamp — because DLL
+updates are manual and reach the guild slowly. What those two signals cannot see is a player who is
+in the world but has not typed in the guild tab this session: no room id is cached, so their client
+never polls, and a quiet guild looks identical to an empty one. That is the gap this closes, and it
+is a gap in *counting* only — such a client cannot receive an injection either, so the bridge's own
+behaviour does not depend on it.
+
+The extension pings it every **60 s** while the bridge is active *and the frame tick is fresh* — the
+tick only runs in the ground scene, so a client parked on the login screen is not reported as logged
+on. The response counts are returned so the in-game `/emu discord status` can show the same figures
+the Discord bot reports without a second endpoint. Like every authenticated request, a ping also
+drains the outbox and carries the cleanup sweep and the command scan.
+
+Status codes: `400` invalid `client` (RFC 7807 body) · `401` missing/bad key · `429` rate-limited —
+same per-key bucket as `/chat` and `/messages`, which one ping a minute per client barely touches.
+
 ### `POST /heartbeat`
 
 Authenticated. Drains the outbox and keeps the app pool warm; returns `{ "outbox": <depth> }`.
 Pointing a pinger at it (with the key) both prevents cold starts and delivers anything a Discord
-rate limit parked when no chat followed it.
+rate limit parked when no chat followed it. It also carries the **bot-command scan**, which is what
+makes `@bot status` answerable when no players are online at all — with no other traffic, the
+pinger's interval is the bot's response time.

@@ -101,6 +101,70 @@ public sealed class RelayOptions
     /// </summary>
     public int CleanupMaxSingleDeletesPerSweep { get; set; } = 5;
 
+    // ------------------------------------------------------------------
+    // Presence and bot commands (R11). Presence is what the status
+    // command reports; the scan is how the command is heard at all.
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// How recently a client must have checked in to count as online. The extension pings presence
+    /// every 60 s, so this tolerates two missed pings before someone is called offline — sized to
+    /// avoid a hiccup reading as "the bridge is down" rather than to be maximally current.
+    /// </summary>
+    public int PresenceOnlineWindowSeconds { get; set; } = 180;
+
+    /// <summary>
+    /// Minimum time between durable writes of one client's presence stamp. The state document is
+    /// rewritten in full on every mutation and a Stage 2 poll arrives every 5 s per client, so
+    /// without this throttle idle polling alone would keep the disk busy. A client whose character
+    /// or galaxy label changed is written immediately regardless.
+    /// </summary>
+    public int PresenceWriteIntervalSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// How long a silent client still counts as "known" (the connected-count denominator). Someone
+    /// who has not launched the game in a week is not usefully part of "who has this running".
+    ///
+    /// A week rather than a month because of what an extension rollout does to the roster: an
+    /// upgraded install arrives under a new client id, and where
+    /// <see cref="Services.PresenceTracker"/> cannot tell which old entry it replaced, the stale
+    /// one can only age out. This is the bound on how long that overcount lasts.
+    /// </summary>
+    public int PresenceRetentionDays { get; set; } = 7;
+
+    /// <summary>
+    /// Hard cap on the presence roster. Guards the state document against a client whose
+    /// self-reported id varies per launch, which would otherwise grow the file without limit.
+    /// </summary>
+    public int PresenceMaxClients { get; set; } = 200;
+
+    /// <summary>
+    /// Minimum time between bot-command scans. Like the cleanup sweep this is a floor, not a
+    /// schedule: the scan piggybacks request traffic, so with nobody online the heartbeat pinger's
+    /// cadence is what actually decides how quickly a "status" mention is answered.
+    /// </summary>
+    public double CommandScanIntervalSeconds { get; set; } = 15;
+
+    /// <summary>
+    /// Mentions older than this get no reply. A status line about a moment that has passed —
+    /// after a recycle, or a night with nobody online — is worse than silence.
+    /// </summary>
+    public int CommandMaxAgeSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// Replies posted per scan. Bounds the channel noise (and the Discord call count) if several
+    /// people mention the bot at once; the excess is dropped rather than deferred.
+    /// </summary>
+    public int CommandMaxRepliesPerScan { get; set; } = 3;
+
+    /// <summary>
+    /// Minimum time between unprompted "nobody is online to receive this" notices. One notice tells
+    /// everyone in the channel what they need to know, so a conversation held while the guild is
+    /// offline must not be annotated line by line — that would make the bot the noisiest member of
+    /// its own channel.
+    /// </summary>
+    public int DeliveryNoticeIntervalMinutes { get; set; } = 15;
+
     /// <summary>
     /// The set of currently valid API keys, as <c>label -> secret</c>. The label is for the
     /// operator's benefit only (it names the key in logs); it is NOT matched against the client id
