@@ -74,9 +74,15 @@ static const unsigned short STUB_PORT = 18091;
 
 static CRITICAL_SECTION g_stubLock;
 static std::vector<std::string> g_responses;   // guarded by g_stubLock
-static volatile LONG g_served = 0;
-static std::string g_firstRequestLine;          // guarded by g_stubLock
+static volatile LONG g_served = 0;              // POLLS only — the response script is indexed by it
+static std::string g_firstRequestLine;          // guarded by g_stubLock; first poll, never a presence ping
 static volatile LONG g_stubStop = 0;
+
+// Presence pings are answered off-script and counted separately. They arrive on
+// their own cadence (once a minute, whenever the frame tick is fresh), so folding
+// them into g_served would shift every scripted poll response unpredictably.
+static volatile LONG g_presenceServed = 0;
+static std::string g_firstPresenceBody;         // guarded by g_stubLock
 
 static std::string makeResponse(const char* statusLine, const char* extraHeaders, const std::string& body) {
 	char header[512];
@@ -123,8 +129,24 @@ static DWORD WINAPI stubMain(LPVOID) {
 
 		std::string request;
 		char buffer[2048];
+		size_t headerEnd = std::string::npos;
 
-		while (request.find("\r\n\r\n") == std::string::npos) {
+		for (;;) {
+			headerEnd = request.find("\r\n\r\n");
+
+			// Keep reading past the headers until the declared body is in hand —
+			// the presence assertions inspect the POST body.
+			if (headerEnd != std::string::npos) {
+				size_t marker = request.find("Content-Length:");
+				size_t expected = 0;
+
+				if (marker != std::string::npos)
+					expected = static_cast<size_t>(atoi(request.c_str() + marker + 15));
+
+				if (request.size() >= headerEnd + 4 + expected)
+					break;
+			}
+
 			int received = recv(client, buffer, sizeof(buffer), 0);
 
 			if (received <= 0)
@@ -136,33 +158,42 @@ static DWORD WINAPI stubMain(LPVOID) {
 				break;
 		}
 
+		bool isPresence = request.find("/api/v1/presence") != std::string::npos;
 		std::string response;
 
 		EnterCriticalSection(&g_stubLock);
 
-		if (g_firstRequestLine.empty()) {
-			size_t lineEnd = request.find("\r\n");
-			g_firstRequestLine = request.substr(0, lineEnd == std::string::npos ? request.size() : lineEnd);
-		}
+		if (isPresence) {
+			if (g_firstPresenceBody.empty() && headerEnd != std::string::npos)
+				g_firstPresenceBody = request.substr(headerEnd + 4);
+		} else {
+			if (g_firstRequestLine.empty()) {
+				size_t lineEnd = request.find("\r\n");
+				g_firstRequestLine = request.substr(0, lineEnd == std::string::npos ? request.size() : lineEnd);
+			}
 
-		LONG index = g_served;
+			LONG index = g_served;
 
-		if (!g_responses.empty()) {
-			size_t pick = static_cast<size_t>(index);
+			if (!g_responses.empty()) {
+				size_t pick = static_cast<size_t>(index);
 
-			if (pick >= g_responses.size())
-				pick = g_responses.size() - 1;
+				if (pick >= g_responses.size())
+					pick = g_responses.size() - 1;
 
-			response = g_responses[pick];
+				response = g_responses[pick];
+			}
 		}
 
 		LeaveCriticalSection(&g_stubLock);
+
+		if (isPresence)
+			response = makeResponse("200 OK", "", "{\"online\":2,\"known\":3,\"onlineWindowSeconds\":180}");
 
 		if (response.empty())
 			response = makeResponse("500 Internal Server Error", "", "{}");
 
 		send(client, response.c_str(), static_cast<int>(response.size()), 0);
-		InterlockedIncrement(&g_served);
+		InterlockedIncrement(isPresence ? &g_presenceServed : &g_served);
 
 		shutdown(client, SD_SEND);
 		closesocket(client);
@@ -241,7 +272,23 @@ static bool statusContains(const char* needle) {
 	return bridgeStatus().find(needle) != std::string::npos;
 }
 
-static void writeIni() {
+// The client id the bridge derived, read back out of the status text. Tests assert
+// on its SHAPE and its stability, never on a literal: the suffix is a hash of this
+// machine, so it differs on whatever box runs the harness.
+static std::string statusClientId() {
+	std::string status = bridgeStatus();
+	size_t start = status.find("client id: ");
+
+	if (start == std::string::npos)
+		return std::string();
+
+	start += strlen("client id: ");
+	size_t end = status.find_first_of(" \n", start);
+
+	return status.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+static void writeIni(bool withClientId = true) {
 	wchar_t path[MAX_PATH];
 	GetModuleFileNameW(nullptr, path, MAX_PATH);
 	wchar_t* slash = wcsrchr(path, L'\\');
@@ -256,10 +303,11 @@ static void writeIni() {
 		"enabled=1\n"
 		"endpoint=http://127.0.0.1:%u/relay\n"
 		"key=harness-test-key\n"
-		"client_id=harness\n"
+		"%s"
 		"allow_http=1\n"
 		"stage2=1\n",
-		STUB_PORT);
+		STUB_PORT,
+		withClientId ? "client_id=harness\n" : "");
 	fclose(file);
 }
 
@@ -398,6 +446,26 @@ static void testLiveLoop() {
 	pumpFrames(3500);
 	CHECK(InterlockedCompareExchange(&g_served, 0, 0) == 0, "no poll without a room id");
 
+	// Presence does NOT share those gates: being in the world is not conditional
+	// on the Stage 2 read path or on having typed in the guild tab.
+	CHECK(InterlockedCompareExchange(&g_presenceServed, 0, 0) == 1, "presence pinged without a room id");
+
+	EnterCriticalSection(&g_stubLock);
+	std::string presenceBody = g_firstPresenceBody;
+	LeaveCriticalSection(&g_stubLock);
+
+	// The configured client_id is a readable PREFIX only — uniqueness comes from a
+	// machine fingerprint appended to it, so two people handed the same ini are
+	// still counted as two clients by the relay.
+	std::string clientId = statusClientId();
+	CHECK(clientId.compare(0, 8, "harness-") == 0 && clientId.size() > 8,
+		"configured client_id keeps a unique suffix");
+	CHECK(presenceBody == "{\"client\":{\"id\":\"" + clientId + "\"}}",
+		"presence body carries the client identity");
+	CHECK(statusContains("players with the extension"), "status: presence counts");
+	CHECK(statusContains("of 3 known"), "status: relay-reported known count");
+	CHECK(statusContains("last presence ping: ok - 2 online of 3 known"), "status: last presence result");
+
 	// Gate 2: room id cached but frame tick stale -> still no poll. The tick
 	// must go stale BEFORE the room id appears, or the worker legitimately
 	// polls inside the freshness window left over from gate 1.
@@ -422,7 +490,8 @@ static void testLiveLoop() {
 	EnterCriticalSection(&g_stubLock);
 	std::string firstRequest = g_firstRequestLine;
 	LeaveCriticalSection(&g_stubLock);
-	CHECK(firstRequest == "GET /relay/api/v1/messages?client=harness HTTP/1.1", "request line + query");
+	CHECK(firstRequest == "GET /relay/api/v1/messages?client=" + clientId + " HTTP/1.1",
+		"request line + query (one identity on every endpoint)");
 
 	// 2: idle poll.
 	DiscordBridge::requestPollNow();
@@ -503,6 +572,23 @@ static void testLiveLoop() {
 	CHECK(pumpUntilServed(12, 10000), "poll resumed after on");
 	Sleep(100);
 	CHECK(DiscordBridge::isEnabled(), "bridge re-enabled");
+
+	// Identity: stable across the ini reloads above (the relay counts installs by
+	// it, so a value that changed per session would inflate the "known" count).
+	CHECK(statusClientId() == clientId, "client id stable across ini reloads");
+
+	// And with client_id left blank — how the handed-out file ships — the id is
+	// still unique, because the machine fingerprint is the part that identifies.
+	writeIni(false);
+	DiscordBridge::setEnabled(true);
+
+	std::string blankLabelId = statusClientId();
+	CHECK(blankLabelId.compare(0, 7, "client-") == 0 && blankLabelId.size() > 7,
+		"blank client_id still yields a unique id");
+	CHECK(blankLabelId.substr(7) == clientId.substr(8),
+		"same machine fingerprint underlies both forms");
+
+	writeIni();
 
 	// Teardown.
 	DiscordBridge::shutdown(false);

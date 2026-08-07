@@ -37,12 +37,22 @@ public static class MessagesEndpoints
                 Stage2Queue queue,
                 Outbox outbox,
                 ChannelCleaner cleaner,
+                PresenceTracker presence,
+                BotCommandScanner commands,
                 CancellationToken cancellationToken) =>
             {
                 if (!TryValidateClient(client, out var errors))
                 {
                     return Results.ValidationProblem(errors);
                 }
+
+                // Before the Stage 2 branch: a client polling is alive whether or not the read path
+                // is configured, and with Stage 2 off this poll is the only signal it sends.
+                presence.Touch(client!);
+
+                // Independent of Stage 2 (see BotCommandScanner) — a poll arriving while the read
+                // path is off is still a chance to hear a "status" mention.
+                await commands.ScanIfDueAsync(cancellationToken);
 
                 if (!discordOptions.CurrentValue.IsStage2Configured)
                 {

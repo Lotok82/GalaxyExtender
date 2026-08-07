@@ -16,19 +16,25 @@ public static class HealthEndpoints
             IOptions<RelayOptions> relayOptions,
             IOptions<DiscordOptions> discordOptions,
             IStateStore stateStore,
+            PresenceTracker presenceTracker,
             HttpContext http) =>
         {
             var now = DateTimeOffset.UtcNow;
             var appData = probe.CheckAppData();
 
-            var (outboxDepth, dedupeEntries, lastForwardUtc, stage2Pending, stage2Cursor, lastCleanupUtc) =
+            var (outboxDepth, dedupeEntries, lastForwardUtc, stage2Pending, stage2Cursor, lastCleanupUtc,
+                    lastCommandScanUtc, botUserIdKnown) =
                 stateStore.Read(state => (
                     state.Outbox.Count,
                     state.Dedupe.Count,
                     state.LastForwardUtc,
                     state.Stage2Pending.Count,
                     state.Stage2Cursor is not null,
-                    state.LastCleanupUtc));
+                    state.LastCleanupUtc,
+                    state.LastCommandScanUtc,
+                    state.BotUserId is not null));
+
+            var presence = presenceTracker.Snapshot();
 
             return Results.Ok(new
             {
@@ -78,7 +84,9 @@ public static class HealthEndpoints
                     apiKeyCount = relayOptions.Value.ApiKeys.Count,
                     discordConfigured = discordOptions.Value.IsConfigured,
                     stage2Configured = discordOptions.Value.IsStage2Configured,
-                    cleanupConfigured = discordOptions.Value.IsCleanupConfigured
+                    cleanupConfigured = discordOptions.Value.IsCleanupConfigured,
+                    commandsConfigured = discordOptions.Value.IsCommandsConfigured,
+                    presenceOnlineWindowSeconds = relayOptions.Value.PresenceOnlineWindowSeconds
                 },
 
                 // Forwarding state. outboxDepth > 0 means undelivered lines are waiting for the
@@ -90,7 +98,19 @@ public static class HealthEndpoints
                     lastForwardUtc,
                     stage2Pending,
                     stage2CursorInitialised = stage2Cursor,
-                    lastCleanupUtc
+                    lastCleanupUtc,
+                    lastCommandScanUtc,
+                    botUserIdKnown
+                },
+
+                // Who the relay believes is running the extension — the same figures the Discord
+                // "@bot status" command reports, so a disagreement between them is a bug in the
+                // reply wording rather than in what the relay knows.
+                presence = new
+                {
+                    online = presence.Online,
+                    known = presence.Known,
+                    lastSeenUtc = presence.LastSeenUtc
                 },
 
                 // Not run automatically — it is an outbound network call, and it requires the

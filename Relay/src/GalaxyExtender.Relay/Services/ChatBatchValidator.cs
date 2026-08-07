@@ -56,6 +56,19 @@ public static class ChatBatchValidator
         return errors.Count == 0;
     }
 
+    /// <summary>
+    /// The client-identity block on its own, for the presence ping — which carries the same
+    /// self-reported labels as a chat batch and must enforce the same rules, so that a client id
+    /// legal on one endpoint cannot be illegal on the other.
+    /// </summary>
+    public static bool TryValidateClient(ChatClient? client, out Dictionary<string, string[]> errors)
+    {
+        errors = new Dictionary<string, string[]>();
+        ValidateClient(client, errors);
+
+        return errors.Count == 0;
+    }
+
     private static void ValidateBatchId(string? batchId, Dictionary<string, string[]> errors)
     {
         if (string.IsNullOrWhiteSpace(batchId))
