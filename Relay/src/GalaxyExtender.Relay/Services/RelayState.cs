@@ -45,6 +45,62 @@ public sealed class RelayState
     /// Discord call, so concurrent requests cannot both pay for a sweep.
     /// </summary>
     public DateTimeOffset? LastCleanupUtc { get; set; }
+
+    /// <summary>
+    /// Every extension client the relay has heard from, with when it was last alive (R11). Durable
+    /// because "how many people have this installed" must survive a recycle — an app pool that
+    /// idle-stops overnight would otherwise report an empty guild every morning.
+    /// </summary>
+    public List<PresenceEntry> Presence { get; set; } = [];
+
+    /// <summary>
+    /// Last channel message id examined by the bot-command scan (R11). Separate from
+    /// <see cref="Stage2Cursor"/> on purpose: the status command answers whether or not the Stage 2
+    /// read path is switched on, so the two paths cannot share a queue position.
+    /// </summary>
+    public string? CommandCursor { get; set; }
+
+    /// <summary>
+    /// When the last bot-command scan started, successful or not — the interval claim, exactly like
+    /// <see cref="LastCleanupUtc"/>.
+    /// </summary>
+    public DateTimeOffset? LastCommandScanUtc { get; set; }
+
+    /// <summary>
+    /// The bot's own Discord user id, discovered once from <c>GET /users/@me</c> so that mentions of
+    /// it can be recognised. Cached durably to keep that call off every scan; the operator can
+    /// override it with <c>Discord:BotUserId</c>, which then takes precedence over this.
+    /// </summary>
+    public string? BotUserId { get; set; }
+
+    /// <summary>
+    /// When the bot last told the channel that a message was not going to reach the guild room as
+    /// posted. Durable so a recycle cannot turn one notice into one per app start, and rate-limited
+    /// by <see cref="RelayOptions.DeliveryNoticeIntervalMinutes"/>.
+    /// </summary>
+    public DateTimeOffset? LastDeliveryNoticeUtc { get; set; }
+}
+
+/// <summary>
+/// One extension client's presence record: an id and when it was last alive, nothing else. The
+/// status command reports COUNTS, so no character or galaxy label is kept — there is nothing to
+/// leak and nothing to keep up to date.
+/// </summary>
+public sealed class PresenceEntry
+{
+    /// <summary>
+    /// The client's self-reported id: a hash of the machine's Windows installation id, optionally
+    /// behind a readable prefix from its ini. It is what separates one install from another — the
+    /// extension makes it unique by construction so no player's configuration can collapse the
+    /// count. Not authentication, and never shown to anyone.
+    /// </summary>
+    public string ClientId { get; set; } = string.Empty;
+
+    /// <summary>First time this client id was ever seen — how long they have been running it.</summary>
+    public DateTimeOffset FirstSeenUtc { get; set; }
+
+    /// <summary>Last check-in. Inside the presence window this client counts as online.</summary>
+    public DateTimeOffset LastSeenUtc { get; set; }
 }
 
 public sealed class DedupeEntry

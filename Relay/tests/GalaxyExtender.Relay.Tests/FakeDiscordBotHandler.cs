@@ -57,6 +57,13 @@ public sealed class FakeDiscordBotHandler : HttpMessageHandler
                 Encoding.UTF8, "application/json")
         });
 
+    /// <summary>Scripts one 200 with an arbitrary JSON body — the bot-identity read, for instance.</summary>
+    public void ScriptBody(string json) =>
+        Script(() => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        });
+
     public void ScriptStatus(HttpStatusCode statusCode) =>
         Script(() => new HttpResponseMessage(statusCode));
 
@@ -100,7 +107,7 @@ public static class DiscordJson
 {
     public static string User(
         string id, string author, string content,
-        string? mentionsJson = null, bool attachments = false)
+        string? mentionsJson = null, bool attachments = false, DateTimeOffset? timestamp = null)
     {
         var extra = new StringBuilder();
 
@@ -114,10 +121,23 @@ public static class DiscordJson
             extra.Append(",\"attachments\":[{\"id\":\"1\",\"filename\":\"cat.png\"}]");
         }
 
+        var stamp = timestamp?.ToString("O") ?? "2026-08-06T12:00:00+00:00";
+
         return $"{{\"id\":\"{id}\",\"content\":{Quote(content)}," +
                $"\"author\":{{\"id\":\"9{id}\",\"username\":\"{author}\",\"global_name\":\"{author}\"}}," +
-               $"\"timestamp\":\"2026-08-06T12:00:00+00:00\"{extra}}}";
+               $"\"timestamp\":\"{stamp}\"{extra}}}";
     }
+
+    /// <summary>
+    /// A message that mentions the bot, as Discord actually delivers one: the <c>&lt;@id&gt;</c>
+    /// token in the content AND the mentioned user in the <c>mentions</c> array. Stamped "now" by
+    /// default, because a command older than the relay's max age is deliberately ignored.
+    /// </summary>
+    public static string Mention(
+        string id, string author, string text, string botUserId, DateTimeOffset? timestamp = null) =>
+        User(id, author, $"<@{botUserId}> {text}",
+            mentionsJson: $"[{{\"id\":\"{botUserId}\",\"username\":\"GalaxyExtender\"}}]",
+            timestamp: timestamp ?? DateTimeOffset.UtcNow);
 
     public static string Webhook(string id) =>
         $"{{\"id\":\"{id}\",\"content\":\"\",\"webhook_id\":\"777\"," +

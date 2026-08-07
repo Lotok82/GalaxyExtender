@@ -81,11 +81,33 @@ public sealed class HostProbe(IHttpClientFactory httpClientFactory, IHostEnviron
         try
         {
             Directory.CreateDirectory(AppDataPath);
-            var probePath = Path.Combine(AppDataPath, $".write-probe-{Environment.ProcessId}");
-            File.WriteAllText(probePath, "probe");
-            var readBack = File.ReadAllText(probePath);
-            File.Delete(probePath);
-            return new AppDataStatus(true, readBack == "probe", null);
+
+            // Unique PER CALL, not per process: two concurrent /health requests sharing one probe
+            // path delete each other's file mid-check, and the loser reports App_Data as unwritable
+            // — the one field on this document that reads as a hard blocker.
+            var probePath = Path.Combine(
+                AppDataPath, $".write-probe-{Environment.ProcessId}-{Guid.NewGuid():N}");
+
+            try
+            {
+                File.WriteAllText(probePath, "probe");
+                var readBack = File.ReadAllText(probePath);
+                return new AppDataStatus(true, readBack == "probe", null);
+            }
+            finally
+            {
+                // Cleanup cannot live on the success path. Unique-per-call means a failure
+                // between the write and the delete — an AV or the indexer holding the file
+                // across ReadAllText — leaks a NEW file on every /health call rather than
+                // reusing one path, so App_Data would grow without bound.
+                try
+                {
+                    File.Delete(probePath);
+                }
+                catch (Exception)
+                {
+                }
+            }
         }
         catch (Exception ex)
         {

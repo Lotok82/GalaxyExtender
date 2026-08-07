@@ -34,6 +34,36 @@ public sealed class DiscordOptions
     /// </summary>
     public bool CleanupEnabled { get; set; }
 
+    /// <summary>
+    /// Operator switch for the bot commands (R11): the bot answers <c>@GalaxyExtender status</c> in
+    /// the bridge channel with who has the extension running. Off by default like the switches
+    /// above — the relay starts posting messages of its own authorship when this goes on, and a
+    /// redeploy alone should never change what appears in a guild's channel. Needs the bot invited
+    /// with Send Messages and Read Message History.
+    /// </summary>
+    public bool CommandsEnabled { get; set; }
+
+    /// <summary>
+    /// The bot's own user id, used to recognise mentions of it. Normally left empty: the relay
+    /// discovers it from <c>GET /users/@me</c> on the first scan and caches it in durable state.
+    /// Set it only to override that — a WRONG value here means no mention is ever recognised, which
+    /// looks exactly like the bot being deaf.
+    /// </summary>
+    public string? BotUserId { get; set; }
+
+    /// <summary>
+    /// The configured override, or null when it is absent OR blank — the single answer both the
+    /// command scan and the Stage 2 reader resolve against.
+    ///
+    /// Blank has to collapse to null HERE rather than at each call site. The two paths make
+    /// opposite decisions from the same value: the scanner decides whether to answer a mention,
+    /// the reader decides whether to keep that mention out of the guild room. A configured-but-
+    /// empty value read as "" by one and as "not configured" by the other puts half a
+    /// conversation with a bot in front of players.
+    /// </summary>
+    public string? ConfiguredBotUserId =>
+        string.IsNullOrWhiteSpace(BotUserId) ? null : BotUserId;
+
     /// <summary>Embed colour for game -> Discord lines. 0x2ECC71 green, per the bridge plan.</summary>
     public int EmbedColor { get; set; } = 3066993;
 
@@ -68,6 +98,17 @@ public sealed class DiscordOptions
     /// </summary>
     public bool IsCleanupConfigured =>
         CleanupEnabled &&
+        !string.IsNullOrWhiteSpace(BotToken) &&
+        !string.IsNullOrWhiteSpace(ChannelId) &&
+        ChannelId.All(char.IsAsciiDigit);
+
+    /// <summary>
+    /// The bot answers commands: enabled AND plausibly credentialed. Independent of
+    /// <see cref="Stage2Enabled"/> for a specific reason — "is the bridge working?" is asked most
+    /// often when it is NOT, so the answer must not depend on the read path being on.
+    /// </summary>
+    public bool IsCommandsConfigured =>
+        CommandsEnabled &&
         !string.IsNullOrWhiteSpace(BotToken) &&
         !string.IsNullOrWhiteSpace(ChannelId) &&
         ChannelId.All(char.IsAsciiDigit);
