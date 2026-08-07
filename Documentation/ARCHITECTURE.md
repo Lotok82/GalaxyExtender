@@ -438,6 +438,24 @@ Tab::appendText hook (main thread)          DiscordBridge worker (WinHTTP)
 |---------|-------------|
 | `/emu discord on` | Enable relaying; re-reads the ini and clears the 401 latch |
 | `/emu discord off` | Disable relaying, discard the queue |
-| `/emu discord status` | State, relay host, queue depth, last HTTP result |
+| `/emu discord status` | State, relay host, queue depth, last HTTP result, presence counts |
 | `/emu discord test` | Enqueue a synthetic line (exercises the strip path) |
 | `/emu discord types` | Observed `ChannelId.type` values with sample lines |
+
+### Presence (R11)
+
+The same worker posts `<endpoint>/api/v1/presence` every 60 s while the bridge is active **and
+the frame tick is fresh**, carrying only the client id. That id is unique by construction rather
+than by configuration — `stableClientId` hashes the machine's `MachineGuid` (read with
+`KEY_WOW64_64KEY`, since the 32-bit registry view does not carry it; hostname as fallback) and
+treats an ini-configured `client_id` as a readable prefix, so a pre-filled ini handed to the whole
+guild cannot collapse the count. It is an accuracy upgrade rather than a prerequisite: the relay already derives presence from
+`/chat` batches and `/messages` polls, so the bot's answer works against DLLs that predate this (DLL
+updates are manual — see the relay README). What the ping adds is the player who is in the world but
+has not typed in the guild tab this session, whose client therefore never polls. It is what lets the
+relay's Discord bot answer a `status` mention with **how many** clients are running — a count, never names, so no player has to fill anything in — and
+nothing else the bridge sends can stand in for it: a batch needs someone to be talking, and the Stage 2 poll is gated on
+`stage2=1` plus a cached guild room id. The frame-tick gate is deliberate: it only ticks in the
+ground scene, so a client parked on the login screen is not reported as logged on. The relay's
+reply (`online`, `known`) is what `status` shows. Contract:
+[Relay/README.md](../Relay/README.md#post-presence--i-am-here).

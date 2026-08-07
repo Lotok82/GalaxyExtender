@@ -13,6 +13,7 @@
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "rpcrt4.lib")
+#pragma comment(lib, "advapi32.lib")   // MachineGuid read for the client identity
 
 // ============================================================================
 // Limits. The first three mirror the relay's own validation (Relay/README.md)
@@ -79,6 +80,16 @@ const ULONGLONG CLAIM_SAFETY_MS = 45000;
 // claimed messages a redelivery, so size this generously.
 const size_t MAX_POLL_RESPONSE_BYTES = 16384;
 
+// --- Presence (R11: "is anyone running the extension?") ---
+//
+// The relay cannot infer this from anything else we send: a batch only goes out
+// when somebody talks, and the Stage 2 poll is gated below on the read path being
+// on AND a cached room id. So the bridge says so explicitly, on a fixed cadence,
+// and the relay's presence window (180 s) tolerates two missed pings.
+const DWORD PRESENCE_INTERVAL_MS = 60000;
+const DWORD PRESENCE_RETRY_MS = 15000;         // after a failure; the relay may just be waking up
+const size_t MAX_PRESENCE_RESPONSE_BYTES = 512;
+
 const size_t MAX_INCOMING_MESSAGES = 25;       // contract is ≤5/poll and we poll only when empty; backstop
 const size_t MAX_PARSED_FIELD_BYTES = 2048;    // parser-level clamp per string field, ditto
 const size_t MAX_MARKED_SENDER_CHARS = 48;     // display rewrite: longest plausible "Name: " prefix
@@ -96,6 +107,7 @@ struct Config {
 	std::wstring host;
 	std::wstring path;          // "<ini path prefix>/api/v1/chat"
 	std::wstring messagesPath;  // "<ini path prefix>/api/v1/messages"
+	std::wstring presencePath;  // "<ini path prefix>/api/v1/presence"
 	std::wstring key;       // never logged, never echoed to chat
 	std::string clientId;
 	std::string character;
@@ -166,6 +178,13 @@ unsigned long s_expiredLocally = 0;        // claims let lapse (CLAIM_SAFETY_MS)
 long long s_discordDropped = 0;            // relay-reported losses (TTL/redelivery cap)
 std::string s_lastInjectedSample;
 ULONGLONG s_lastInjectedTick = 0;
+
+// --- guarded by s_lock (presence) ---
+ULONGLONG s_nextPresenceTick = 0;
+int s_presenceOnline = -1;                 // as last reported BY the relay; -1 = never answered
+int s_presenceKnown = -1;
+std::string s_lastPresenceResult;
+ULONGLONG s_lastPresenceResultTick = 0;
 
 // --- main thread only ---
 unsigned long long s_frameCounter = 0;
@@ -757,6 +776,7 @@ bool parseEndpoint(const std::wstring& endpoint, Config& config) {
 
 	config.path = prefix + fullSuffix;
 	config.messagesPath = prefix + L"/api/v1/messages";
+	config.presencePath = prefix + L"/api/v1/presence";
 
 	if (config.host.empty()) {
 		config.error = "endpoint has no host";
@@ -777,31 +797,107 @@ std::string clampLabel(const std::wstring& value) {
 	return narrow;
 }
 
-// The default id must be stable per machine WITHOUT identifying it: hostnames
-// frequently embed real names ("JAMES-LAPTOP"), and this value travels with
-// every batch and sits in the relay's logs. FNV-1a of the computer name keeps
-// the dedupe/diagnostic value and drops the PII; anyone who wants a readable
-// id sets client_id in the ini.
-std::string defaultClientId() {
-	char name[MAX_COMPUTERNAME_LENGTH + 1];
-	DWORD size = static_cast<DWORD>(_countof(name));
-
-	if (!GetComputerNameA(name, &size) || size == 0)
-		return "unknown-client";
-
+unsigned long long fnv1a(const char* data, size_t bytes) {
 	unsigned long long hash = 14695981039346656037ULL;
 
-	for (DWORD i = 0; i < size; ++i) {
-		hash ^= static_cast<unsigned char>(name[i]);
+	for (size_t i = 0; i < bytes; ++i) {
+		hash ^= static_cast<unsigned char>(data[i]);
 		hash *= 1099511628211ULL;
 	}
 
-	char id[32];
-	sprintf_s(id, sizeof(id), "client-%08lx%08lx",
+	return hash;
+}
+
+// MachineGuid is a GUID Windows generates once per installation. It is the most
+// reliable "this is a different machine" signal available without writing
+// anything anywhere, which matters because the relay counts installs by this id.
+//
+// KEY_WOW64_64KEY is load-bearing: this DLL is 32-bit, and under the registry
+// redirector the 32-bit view of SOFTWARE\Microsoft\Cryptography does not carry
+// the value. Without the flag every client would fall back to the hostname.
+bool readMachineGuid(std::string& out) {
+	HKEY key = nullptr;
+
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", 0,
+			KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS)
+		return false;
+
+	wchar_t value[64];
+	DWORD bytes = sizeof(value);
+	DWORD type = 0;
+
+	LSTATUS status = RegQueryValueExW(key, L"MachineGuid", nullptr, &type,
+		reinterpret_cast<BYTE*>(value), &bytes);
+
+	RegCloseKey(key);
+
+	if (status != ERROR_SUCCESS || type != REG_SZ || bytes < sizeof(wchar_t))
+		return false;
+
+	size_t chars = bytes / sizeof(wchar_t);
+
+	// RegQueryValueEx counts the terminator when it is stored; don't hash it.
+	while (chars > 0 && value[chars - 1] == L'\0')
+		--chars;
+
+	if (chars == 0)
+		return false;
+
+	out = narrowLossy(std::wstring(value, chars));
+
+	return !out.empty();
+}
+
+// A per-machine fingerprint that is stable across sessions, unique in practice,
+// and NOT identifying: it is a hash, so the relay's logs and the presence roster
+// never carry a machine name (hostnames frequently embed real names —
+// "JAMES-LAPTOP"). MachineGuid first, hostname as the fallback.
+std::string machineFingerprint() {
+	std::string source;
+
+	if (!readMachineGuid(source)) {
+		char name[MAX_COMPUTERNAME_LENGTH + 1];
+		DWORD size = static_cast<DWORD>(_countof(name));
+
+		if (GetComputerNameA(name, &size) && size > 0)
+			source.assign(name, size);
+	}
+
+	if (source.empty())
+		return std::string();
+
+	unsigned long long hash = fnv1a(source.data(), source.size());
+
+	char hex[24];
+	sprintf_s(hex, sizeof(hex), "%08lx%08lx",
 		static_cast<unsigned long>(hash >> 32),
 		static_cast<unsigned long>(hash & 0xFFFFFFFFUL));
 
-	return id;
+	return hex;
+}
+
+// The id every request carries. The relay counts how many people are running the
+// extension by counting DISTINCT values of this, so it must not be something a
+// player can duplicate: a configured client_id is only a readable PREFIX, and
+// uniqueness always comes from the machine fingerprint. Two people handed the
+// same ini therefore still count as two clients — which is the whole point,
+// since the ini is written once and copied to whoever asks for it.
+std::string stableClientId(const std::wstring& configuredLabel) {
+	std::string fingerprint = machineFingerprint();
+	std::string label = clampLabel(configuredLabel);
+
+	// Leaves room for "-" + 16 hex digits inside the relay's 64-char limit.
+	if (label.size() > 40)
+		label.resize(40);
+
+	if (fingerprint.empty()) {
+		// Neither MachineGuid nor a hostname: nothing unique to offer. Every such
+		// client collapses into one entry in the relay's count, which is why both
+		// sources have to fail before we get here.
+		return label.empty() ? "unknown-client" : label;
+	}
+
+	return label.empty() ? "client-" + fingerprint : label + "-" + fingerprint;
 }
 
 // Builds a fresh Config from the ini. Caller assigns it under the lock.
@@ -852,9 +948,7 @@ Config loadConfigFromDisk() {
 		config.channelType = static_cast<int>(parsed);
 	}
 
-	config.clientId = clampLabel(clientId);
-	if (config.clientId.empty())
-		config.clientId = defaultClientId();
+	config.clientId = stableClientId(clientId);
 
 	config.character = clampLabel(character);
 	config.galaxy = clampLabel(galaxy);
@@ -1081,6 +1175,51 @@ HttpResult getMessages(HINTERNET connection, const Config& config) {
 	return result;
 }
 
+// POST /presence — "a client with the extension is in the world right now".
+HttpResult postPresence(HINTERNET connection, const Config& config, const std::string& body) {
+	HttpResult result;
+
+	HINTERNET request = WinHttpOpenRequest(connection, L"POST", config.presencePath.c_str(), nullptr,
+		WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+		config.https ? WINHTTP_FLAG_SECURE : 0);
+
+	if (request == nullptr) {
+		result.lastError = GetLastError();
+		return result;
+	}
+
+	std::wstring headers = L"Content-Type: application/json; charset=utf-8\r\nX-Relay-Key: ";
+	headers += config.key;
+
+	BOOL sent = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(headers.size()),
+		const_cast<char*>(body.c_str()), static_cast<DWORD>(body.size()),
+		static_cast<DWORD>(body.size()), 0);
+
+	SecureZeroMemory(&headers[0], headers.size() * sizeof(wchar_t));
+
+	if (!sent || !WinHttpReceiveResponse(request, nullptr)) {
+		result.lastError = GetLastError();
+		closeHandleIfSet(request);
+		return result;
+	}
+
+	readResponse(request, result, MAX_PRESENCE_RESPONSE_BYTES);
+	closeHandleIfSet(request);
+
+	return result;
+}
+
+// The presence body: the client id and nothing else. The relay counts installs and
+// reports a number, so character/galaxy would travel for no reader — and the ini
+// ships with those fields blank precisely so nobody has to fill them in.
+std::string buildPresenceBody(const Config& config) {
+	std::string body = "{\"client\":{\"id\":";
+	appendJsonString(body, config.clientId);
+	body += "}}";
+
+	return body;
+}
+
 std::string buildBody(const Config& config, const std::string& batchId,
 	const std::vector<QueuedLine>& lines) {
 
@@ -1126,6 +1265,111 @@ void recordResult(const char* text) {
 	EnterCriticalSection(&s_lock);
 	s_lastResult = text;
 	s_lastResultTick = GetTickCount64();
+	LeaveCriticalSection(&s_lock);
+}
+
+// ============================================================================
+// Presence (worker thread)
+// ============================================================================
+
+// Runs on every worker wake; sends at most one ping per PRESENCE_INTERVAL_MS.
+//
+// The frame-tick gate is what makes "online" mean something a player would agree
+// with: the tick only runs in the ground scene, so a client parked on the login
+// screen is not reported as logged on. It is deliberately NOT gated on Stage 2 or
+// on a cached room id — being in the world is not conditional on either.
+void presenceStep(HINTERNET& session, HINTERNET& connection, unsigned long& connectionGeneration) {
+	ULONGLONG now = GetTickCount64();
+
+	Config config;
+	unsigned long generation = 0;
+	bool due = false;
+
+	EnterCriticalSection(&s_lock);
+
+	if (s_config.valid && s_config.enabled && !s_stopping && now >= s_nextPresenceTick) {
+		config = s_config;
+		generation = s_configGeneration;
+		due = true;
+	}
+
+	LeaveCriticalSection(&s_lock);
+
+	if (!due)
+		return;
+
+	LONGLONG lastFrame = InterlockedCompareExchange64(&s_lastFrameTick, 0, 0);
+
+	if (lastFrame == 0 || now < static_cast<ULONGLONG>(lastFrame) ||
+		now - static_cast<ULONGLONG>(lastFrame) > FRAME_STALE_MS)
+		return;   // not in the world; the next wake re-checks
+
+	if (connection != nullptr && generation != connectionGeneration) {
+		closeHandleIfSet(connection);
+		closeHandleIfSet(session);
+	}
+
+	if (connection == nullptr) {
+		if (!openConnection(config, session, connection)) {
+			EnterCriticalSection(&s_lock);
+			s_lastPresenceResult = "cannot open connection to relay";
+			s_lastPresenceResultTick = now;
+			s_nextPresenceTick = now + PRESENCE_RETRY_MS;
+			LeaveCriticalSection(&s_lock);
+
+			return;
+		}
+
+		connectionGeneration = generation;
+	}
+
+	HttpResult result = postPresence(connection, config, buildPresenceBody(config));
+	now = GetTickCount64();
+
+	char summary[128];
+	int online = -1;
+	int known = -1;
+	ULONGLONG next = now + PRESENCE_INTERVAL_MS;
+
+	if (result.transportError) {
+		closeHandleIfSet(connection);
+		closeHandleIfSet(session);
+
+		sprintf_s(summary, sizeof(summary), "network error %lu", result.lastError);
+		next = now + PRESENCE_RETRY_MS;
+	} else if (result.statusCode >= 200 && result.statusCode < 300) {
+		online = static_cast<int>(jsonNumber(result.body, "online", -1));
+		known = static_cast<int>(jsonNumber(result.body, "known", -1));
+
+		sprintf_s(summary, sizeof(summary), "ok - %d online of %d known", online, known);
+	} else if (result.statusCode == 401 || result.statusCode == 403) {
+		// Same latch as the batch path: retrying a rejected key cannot help, and
+		// the bridge should stop talking to the relay until the ini is fixed.
+		logLine("relay rejected the key on presence (HTTP %lu) - stopping.", result.statusCode);
+		InterlockedExchange(&s_authFailed, 1);
+
+		sprintf_s(summary, sizeof(summary), "%lu rejected key - bridge stopped", result.statusCode);
+	} else if (result.statusCode == 404) {
+		// A relay older than R11. Presence is optional by design: back off to a
+		// long cadence rather than logging every minute forever.
+		sprintf_s(summary, sizeof(summary), "404 - relay has no presence endpoint");
+		next = now + PRESENCE_INTERVAL_MS * 10;
+	} else {
+		sprintf_s(summary, sizeof(summary), "HTTP %lu", result.statusCode);
+		next = now + PRESENCE_RETRY_MS;
+	}
+
+	EnterCriticalSection(&s_lock);
+
+	if (online >= 0) {
+		s_presenceOnline = online;
+		s_presenceKnown = known;
+	}
+
+	s_lastPresenceResult = summary;
+	s_lastPresenceResultTick = now;
+	s_nextPresenceTick = next;
+
 	LeaveCriticalSection(&s_lock);
 }
 
@@ -1523,6 +1767,13 @@ DWORD WINAPI workerMain(LPVOID) {
 
 		if (InterlockedCompareExchange(&s_authFailed, 0, 0) != 0)
 			continue;   // the poll may just have latched a bad key
+
+		// Presence next, for the same reason: time-gated to once a minute, and it
+		// must not be starved by a chat stream that keeps `continue`-ing below.
+		presenceStep(session, connection, connectionGeneration);
+
+		if (InterlockedCompareExchange(&s_authFailed, 0, 0) != 0)
+			continue;
 
 		Config config;
 		unsigned long generation = 0;
@@ -2528,6 +2779,7 @@ void DiscordBridge::setEnabled(bool value) {
 		s_stopping = false;
 		s_nextSendTick = 0;
 		s_nextPollTick = 0;
+		s_nextPresenceTick = 0;
 		s_pollFailures = 0;
 		s_stage2Relay = -1;
 		LeaveCriticalSection(&s_lock);
@@ -2606,6 +2858,10 @@ void DiscordBridge::appendStatus(std::string& out) {
 	long long discordDropped = 0;
 	std::string lastInjectedSample;
 	ULONGLONG lastInjectedTick = 0;
+	int presenceOnline = -1;
+	int presenceKnown = -1;
+	std::string lastPresenceResult;
+	ULONGLONG lastPresenceResultTick = 0;
 
 	EnterCriticalSection(&s_lock);
 	config = s_config;
@@ -2626,6 +2882,10 @@ void DiscordBridge::appendStatus(std::string& out) {
 	discordDropped = s_discordDropped;
 	lastInjectedSample = s_lastInjectedSample;
 	lastInjectedTick = s_lastInjectedTick;
+	presenceOnline = s_presenceOnline;
+	presenceKnown = s_presenceKnown;
+	lastPresenceResult = s_lastPresenceResult;
+	lastPresenceResultTick = s_lastPresenceResultTick;
 	LeaveCriticalSection(&s_lock);
 
 	bool authFailed = InterlockedCompareExchange(&s_authFailed, 0, 0) != 0;
@@ -2727,6 +2987,22 @@ void DiscordBridge::appendStatus(std::string& out) {
 		sprintf_s(line, sizeof(line), "  last injected: %s (%llus ago)\n",
 			lastInjectedSample.c_str(),
 			static_cast<unsigned long long>((now - lastInjectedTick) / 1000));
+		out += line;
+	}
+
+	// --- Presence: the same figures the Discord "@bot status" command reports ---
+
+	if (presenceOnline >= 0) {
+		sprintf_s(line, sizeof(line),
+			"  players with the extension: \\#00ff00%d online\\#ffffff of %d known\n",
+			presenceOnline, presenceKnown);
+		out += line;
+	}
+
+	if (!lastPresenceResult.empty()) {
+		sprintf_s(line, sizeof(line), "  last presence ping: %s (%llus ago)\n",
+			lastPresenceResult.c_str(),
+			static_cast<unsigned long long>((now - lastPresenceResultTick) / 1000));
 		out += line;
 	}
 }

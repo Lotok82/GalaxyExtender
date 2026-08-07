@@ -31,6 +31,8 @@ public static class ChatEndpoints
                 Outbox outbox,
                 Stage2Queue stage2Queue,
                 ChannelCleaner cleaner,
+                PresenceTracker presence,
+                BotCommandScanner commands,
                 ILogger<ChatBatch> logger,
                 CancellationToken cancellationToken) =>
             {
@@ -51,6 +53,11 @@ public static class ChatEndpoints
                 var lines = batch.Lines!;
                 var clientId = batch.Client!.Id;
 
+                // A client sending chat is unambiguously alive, so the presence stamp is refreshed
+                // even on the paths that reject below: it costs nothing, and it keeps the status
+                // command honest for a client on a build older than the presence ping.
+                presence.Touch(clientId!);
+
                 if (!discordOptions.CurrentValue.IsConfigured)
                 {
                     // Contract: 503 when the webhook is not configured. Deliberately BEFORE any
@@ -65,8 +72,10 @@ public static class ChatEndpoints
                 // preserving order as closely as this host allows.
                 await outbox.DrainAsync(cancellationToken);
 
-                // Piggybacked channel cleanup (R10) — a no-op between sweeps.
+                // Piggybacked channel cleanup (R10) and bot-command scan (R11) — both no-ops
+                // between their intervals.
                 await cleaner.SweepIfDueAsync(cancellationToken);
+                await commands.ScanIfDueAsync(cancellationToken);
 
                 // Dedupe on the normalised form; forward the display form. The key MUST come from
                 // the normalised text or two clients could disagree after presentation escaping.
@@ -176,11 +185,19 @@ public static class ChatEndpoints
         // Authenticated no-op that drains the outbox and keeps the app pool warm. Cheap insurance
         // given idle-stop: a cron/pinger POSTing here with the key both prevents cold starts and
         // delivers anything a 429 parked when no chat followed it.
+        //
+        // It also carries the bot-command scan, which is what makes "@bot status" answerable when
+        // NOBODY is online — the case where the question actually gets asked. With no player
+        // traffic, the pinger's cadence is the bot's response time.
         app.MapPost("/api/v1/heartbeat", async (
-            Outbox outbox, ChannelCleaner cleaner, CancellationToken cancellationToken) =>
+            Outbox outbox,
+            ChannelCleaner cleaner,
+            BotCommandScanner commands,
+            CancellationToken cancellationToken) =>
         {
             await outbox.DrainAsync(cancellationToken);
             await cleaner.SweepIfDueAsync(cancellationToken);
+            await commands.ScanIfDueAsync(cancellationToken);
             return Results.Ok(new { outbox = outbox.Depth });
         });
     }

@@ -99,12 +99,46 @@ Without the file the bridge stays inactive and says why in `/emu discord status`
 |---------|-------------|
 | `/emu discord on` | Start relaying. Also re-reads `DiscordBridge.ini`, so a corrected endpoint or key takes effect without restarting the client |
 | `/emu discord off` | Stop relaying and discard anything queued |
-| `/emu discord status` | State, relay host, queue depth and the last HTTP result. Never prints the key |
+| `/emu discord status` | State, relay host, queue depth, the last HTTP result, and how many players have the extension running. Never prints the key |
 | `/emu discord test` | Queue a synthetic line to check the round trip |
 | `/emu discord types` | Chat channel types seen so far — use this to confirm which one carries guild chat |
 
 If the relay rejects your key the bridge stops rather than retrying; `status` says so. Fix
 `key` in the ini and run `/emu discord on`.
+
+**Asking from Discord.** Mention the bridge bot in the Discord channel — whatever it is called on
+your server — and it answers with a count:
+
+```
+@YourBot status
+→ **Guild chat bridge: online** — 2 of 5 clients connected (checked in within the last 3 min).
+
+@YourBot status          (nobody playing)
+→ **Guild chat bridge: offline** — nobody has checked in within the last 3 min.
+  5 clients seen recently; last seen 2 h 11 min ago.
+```
+
+Any client connected means online; none means offline, and then it says how long ago the last one
+was seen. "Connected" means **a client currently able to carry guild chat** — one that has been in
+touch with the relay in the last few minutes, which is what the bot can actually observe. No names
+are involved anywhere, and nothing needs filling into `DiscordBridge.ini` for the count to work.
+Mentioning it with `help` lists what it understands, and it stays quiet when mentioned in ordinary
+conversation. Renaming the bot in Discord changes nothing: it recognises mentions of *itself*, not of
+a particular name, and its replies never name it either.
+
+**It also speaks up on its own** when you post something that isn't going to reach the guild room, so
+you never have to guess whether it landed:
+
+```
+Bob: anyone up for a Krayt run?
+→ **Guild chat bridge: offline** — nobody has checked in within the last 3 min (last seen 2 h 11 min ago).
+  This message is waiting, not lost: the first client to come online posts it into the guild room.
+```
+
+A message posted to an empty guild really does arrive later — whoever logs in next posts it into
+guild chat. If the bridge is switched off at the relay instead, the bot says so plainly ("will not
+appear in the guild room, now or later") rather than implying it is queued. You get one notice per
+quiet spell, not one per line, and none at all while somebody is online.
 
 ### Other
 
