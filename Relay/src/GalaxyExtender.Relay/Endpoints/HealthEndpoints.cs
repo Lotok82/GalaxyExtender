@@ -17,6 +17,7 @@ public static class HealthEndpoints
             IOptions<DiscordOptions> discordOptions,
             IStateStore stateStore,
             PresenceTracker presenceTracker,
+            BackgroundTicker ticker,
             HttpContext http) =>
         {
             var now = DateTimeOffset.UtcNow;
@@ -101,6 +102,29 @@ public static class HealthEndpoints
                     lastCleanupUtc,
                     lastCommandScanUtc,
                     botUserIdKnown
+                },
+
+                // Is the timer that carries the outbox, the cleanup and the bot when nobody is in
+                // game actually running? This is the reading the whole feature turns on: `ticks`
+                // climbing while `presence.online` is 0 means it works on this host. `ticks` back
+                // at a low number with a fresh `process.uptimeSeconds` means the pool idle-stopped
+                // and killed it — the case Relay:SelfPingUrl exists for.
+                backgroundTicker = new
+                {
+                    enabled = ticker.Enabled,
+                    intervalSeconds = relayOptions.Value.BackgroundTickSeconds,
+                    ticks = ticker.Ticks,
+                    lastTickUtc = ticker.LastTickUtc,
+                    lastError = ticker.LastError,
+                    // Whether, not where: the URL is the operator's business and this document is
+                    // unauthenticated.
+                    selfPing = !string.IsNullOrWhiteSpace(relayOptions.Value.SelfPingUrl),
+                    // Configured is not the same as working, and only this says which. A wrong
+                    // SelfPingUrl otherwise fails silently for ever — the ticker keeps reporting
+                    // healthy right up until the idle timer it was meant to defeat kills it. The
+                    // detail can name the host it tried, which is the relay's own public address
+                    // and no more sensitive than `storage.appDataError` already published here.
+                    selfPingError = ticker.SelfPingError
                 },
 
                 // Who the relay believes is running the extension — the same figures the Discord

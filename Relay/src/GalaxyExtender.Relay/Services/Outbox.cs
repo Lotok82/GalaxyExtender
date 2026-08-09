@@ -6,10 +6,12 @@ namespace GalaxyExtender.Relay.Services;
 /// <summary>
 /// Durable holding pen for webhook payloads that could not be delivered (Discord 429 or outage).
 ///
-/// There is no background worker on shared IIS hosting, so the outbox is drained
-/// OPPORTUNISTICALLY at the start of every authenticated request (chat POST, heartbeat). Entries
-/// survive recycles via the state store; that durability is the only honest way not to lose lines
-/// on this host.
+/// The outbox is drained OPPORTUNISTICALLY at the start of every authenticated request (chat POST,
+/// heartbeat), and again on the <see cref="BackgroundTicker"/> so a parked line does not sit there
+/// until somebody logs in. The request path stays load-bearing rather than deferring to the timer:
+/// shared IIS hosting can idle-stop the process, and a drain that only happened on a tick would
+/// stop happening on exactly the host that stops it. Entries survive recycles via the state store;
+/// that durability is the only honest way not to lose lines here.
 /// </summary>
 public sealed class Outbox(
     IStateStore store,

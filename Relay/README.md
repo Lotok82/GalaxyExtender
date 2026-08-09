@@ -7,7 +7,7 @@ this file is the operational reference and the wire contract the C++ side codes 
 - **Target:** `net8.0`, ASP.NET Core minimal API
 - **Host:** IIS shared hosting (Plesk), in-process (`AspNetCoreModuleV2`), dedicated app pool, 1 worker process
 - **Live at:** `https://mesanderson.co.uk/relay` — subfolder registered as an IIS application
-- **Status:** **All phases complete — forwarding AND the Stage 2 read path (R3–R7) are implemented.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` serves the pinned Stage 2 claim contract for real when `Discord:BotToken` + `Discord:ChannelId` + `Discord:Stage2Enabled` are configured (on-demand channel fetch, echo filter, sanitizer, claim/redelivery/ack store) and answers empty + `X-Relay-Stage2: disabled` otherwise. Marked lines (`[Discord] …` after the sender prefix) arriving on `/chat` are the Stage 2 delivery ack — matched exact-first-then-mask-tolerant, counted as `accepted`, and **never forwarded to Discord**. `POST /api/v1/presence` records which extension clients are alive, and with `Discord:CommandsEnabled` the bot answers a `status` mention in the channel with how many clients are online (R11 — see [Bot commands and presence](#bot-commands-and-presence-r11)). 210 tests. Remaining: Phase 6 (post-deploy hardening checks).
+- **Status:** **All phases complete — forwarding AND the Stage 2 read path (R3–R7) are implemented.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` serves the pinned Stage 2 claim contract for real when `Discord:BotToken` + `Discord:ChannelId` + `Discord:Stage2Enabled` are configured (on-demand channel fetch, echo filter, sanitizer, claim/redelivery/ack store) and answers empty + `X-Relay-Stage2: disabled` otherwise. Marked lines (`[Discord] …` after the sender prefix) arriving on `/chat` are the Stage 2 delivery ack — matched exact-first-then-mask-tolerant, counted as `accepted`, and **never forwarded to Discord**. `POST /api/v1/presence` records which extension clients are alive, and with `Discord:CommandsEnabled` the bot answers a `status` mention in the channel with how many clients are online (R11 — see [Bot commands and presence](#bot-commands-and-presence-r11)). A [background ticker](#background-ticker-r12) (R12) runs the outbox drain, the cleanup sweep and the command scan on a timer, so all three still happen with nobody in game — the case where the bot most needs to answer. 237 tests. Remaining: Phase 6 (post-deploy hardening checks).
 
 Verified on the host 2026-08-05: .NET 8.0.29 / Windows Server 2019, outbound to discord.com reachable (200 in 194 ms), `App_Data` writable, `process.id` stable across 4 minutes, `isHttps` reported correctly so `RequireHttps` is enabled.
 
@@ -38,6 +38,7 @@ Relay/
     Services/BotCommandScanner.cs    reads mentions, posts the bot's replies
     Services/BotCommands.cs          what counts as a command
     Services/StatusReport.cs         the wording the bot posts
+    Services/BackgroundTicker.cs     the same work on a timer, for when nobody is in game
     App_Data/                        runtime state + logs (git-ignored contents)
     web.config                       IIS in-process hosting
   tests/GalaxyExtender.Relay.Tests/
@@ -98,6 +99,8 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Relay:PresenceWriteIntervalSeconds` | `30` | Minimum time between durable writes of one client's presence stamp. |
 | `Relay:PresenceRetentionDays` | `7` | How long a silent client still counts as "known" (the connected-count denominator). |
 | `Relay:PresenceMaxClients` | `200` | Hard cap on the presence roster. |
+| `Relay:BackgroundTickSeconds` | `60` | Interval for the background ticker below. `0` disables it and everything reverts to running on request traffic only. Clamped to 1 s–1 h. |
+| `Relay:SelfPingUrl` | — | Optional absolute `http(s)` URL the ticker GETs once per tick, to stop IIS idle-stopping the pool. Point it at this relay's own `/api/v1/health`. Off by default — see below for how to tell whether you need it, and check `backgroundTicker.selfPingError` on `/health` once set. |
 
 ### Channel-history cleanup (R10)
 
@@ -108,7 +111,12 @@ piggybacks on chat POSTs, heartbeats and Stage 2 polls, at most once per `Cleanu
 claimed atomically through the durable `lastCleanupUtc` stamp (visible on `/health`). One sweep is
 one page read (≤100 messages) plus one bulk-delete; a bigger backlog self-heals across sweeps.
 Requires the bot to have **Manage Messages** and **Read Message History** in the channel. When
-nobody is online the sweep pauses with everything else — the heartbeat pinger covers that gap.
+nobody is online the request traffic stops, and the [background ticker](#background-ticker-r12)
+carries the sweep instead.
+
+**Check `Discord:ChannelId` before enabling both.** Deletion is irreversible, and with the ticker
+running the sweep no longer happens only while somebody is playing — a wrong channel is now emptied
+round the clock rather than during play sessions, with nobody there to notice.
 
 ### Bot commands and presence (R11)
 
@@ -173,15 +181,17 @@ overwhelmingly common case), for messages that sanitize to nothing, for chat old
 one notice tells everyone in the channel what they need to know. A `status` command and a notice are
 separate events; neither silences the other.
 
-**Operational catch:** with nobody in game the heartbeat pinger is the only thing driving the scan,
-so it must fire more often than `CommandMaxAgeSeconds` (5 min) or every message will already be too
-stale to answer by the time the relay looks. A pinger at 1–2 minutes is comfortable.
+**Operational catch:** whatever drives the scan while nobody is in game has to do so more often than
+`CommandMaxAgeSeconds` (5 min), or every message is already too stale to answer by the time the relay
+looks. That is what the [background ticker](#background-ticker-r12) is for, at 60 s. Before it
+existed the only candidate was an external pinger on `/heartbeat`, and without one the bot was
+simply deaf whenever the guild was empty.
 
 There is no gateway connection, so "the bot listens" means the relay reads the channel on the back
-of authenticated request traffic — chat POSTs, presence pings, Stage 2 polls and `/heartbeat` — at
-most once per `CommandScanIntervalSeconds`, claimed atomically through the durable
-`lastCommandScanUtc` stamp. **With nobody in game, the heartbeat pinger's cadence is the bot's
-response time**, which is exactly the case that matters: "is it online?" gets asked when it looks
+of authenticated request traffic — chat POSTs, presence pings, Stage 2 polls and `/heartbeat` — or
+on a background tick, at most once per `CommandScanIntervalSeconds`, claimed atomically through the
+durable `lastCommandScanUtc` stamp. **With nobody in game, the tick interval is the bot's response
+time**, which is exactly the case that matters: "is it online?" gets asked when it looks
 like it isn't. The scan keeps its own cursor, independent of Stage 2's, so it works with the read
 path switched off; the first scan after enabling stamps that cursor and answers nothing, so turning
 the feature on never replies to mentions already in the channel. Replies are at-most-once — the
@@ -225,6 +235,72 @@ long as anyone is still on an old DLL. Where the old id is a configured label th
 label plus the fingerprint, so the relay retires the old entry the moment the new one appears. Where
 it was blank the two ids are unrelated hashes and nothing can link them, so the stale entry only ages
 out — hence a retention window of days rather than the month it would otherwise want.
+
+### Background ticker (R12)
+
+Everything above is request-driven, and that leaves one hole: **with nobody in game there are no
+requests**, so nothing drained the outbox, swept the channel, or read the bridge channel for
+commands. The bot was deaf and mute for exactly as long as the guild was empty — which is when
+"is the bridge up?" gets asked, and when a Discord message posted into the channel most needs to be
+told it is not being delivered. The design named an external `/heartbeat` pinger as the answer;
+none was ever set up, so in practice the gap was total.
+
+`Relay:BackgroundTickSeconds` (default 60) runs the same three pieces of work a request carries,
+on a timer. It adds no behaviour of its own and no Discord traffic an equivalent request would not
+have caused: each piece keeps its durable interval stamp, so a tick arriving inside a piece's window
+is a few in-memory reads. `0` switches it off and restores the old behaviour exactly.
+
+That free ride applies to the cleanup sweep, whose window (`CleanupIntervalMinutes`, 15 min) is far
+longer than a tick. It does **not** apply to the command scan: at the shipped defaults the tick
+(60 s) is slower than `CommandScanIntervalSeconds` (15 s), so the scan is due every time. Steady
+state with the guild empty is therefore **one Discord channel read and one `relay-state.json` write
+per tick** — 60 an hour, round the clock — because claiming a scan stamps it durably. That is the
+floor this feature costs; a longer `BackgroundTickSeconds` lowers it, at the price of the bot's
+response time.
+
+The request-piggybacked calls stay where they are rather than deferring to the timer, because the
+timer is the part that can be taken away:
+
+**IIS idle-stops a worker process that has gone without a *request*, and background CPU activity
+does not count.** On a pool with the default 20-minute `idleTimeout` the ticker is killed by the
+very quiet period it exists for. Nothing in-process can prevent that — only an inbound request
+resets the timer — which is what `Relay:SelfPingUrl` is: point it at this relay's own
+`/api/v1/health` (unauthenticated, does no outbound work) and each tick makes one request against
+itself. It is off by default because it costs an outbound call per tick and buys nothing on a host
+that does not idle-stop.
+
+`/health` reports enough to decide:
+
+```jsonc
+"backgroundTicker": {
+  "enabled": true,        // the LOOP is running, not merely that the config says it should
+  "intervalSeconds": 60,
+  "ticks": 1043,          // climbing while presence.online is 0 = it works on this host
+  "lastTickUtc": "...",   // a gap here vs process.startedUtc = the pool stopped, not a wedge
+  "lastError": null,      // last tick's failure, if any — the host refusing something shows here
+  "selfPing": false,      // whether a SelfPingUrl is configured
+  "selfPingError": null   // ...and whether it WORKS. Non-null = the keep-alive is not keeping alive
+}
+```
+
+Read `ticks` against `process.uptimeSeconds`: **ticks resetting to a low number after a quiet
+night means the pool idle-stopped and killed the ticker** — turn on `SelfPingUrl`, or set the app
+pool's idle timeout to 0 if the control panel allows it. Ticks climbing steadily through the small
+hours means shared hosting is tolerating it and nothing more is needed.
+
+`lastError` and `selfPingError` mean opposite things and are kept apart on purpose: the first says
+the relay's own work is failing, the second says the keep-alive is failing and the ticker may be
+about to be idle-stopped out of existence. After setting `SelfPingUrl`, check `selfPingError` is
+`null` — a typo'd URL is otherwise indistinguishable from a working one until the night it fails to
+save you.
+
+`enabled` reports the loop, not the setting. Changing `BackgroundTickSeconds` to `0` at runtime
+stops the loop permanently, and it does not come back when the value does — restoring it needs an
+app restart, which on IIS is what editing appsettings or an environment variable causes anyway.
+
+Load, since a shared host that decides you are abusive is the risk that matters: one timer, and at
+the default 60 s tick one Discord GET plus one small state-file write per minute while the channel
+scan is enabled — less than a single player's client generates by polling.
 
 Locally:
 
@@ -291,7 +367,8 @@ flagged as unverified. Call it **twice, a few minutes apart**, and read:
 | Field | What it tells you |
 |---|---|
 | `process.id` | Changes between calls → app-pool **recycle** or a **web garden** (`maxProcesses > 1`). A web garden is what forces the cross-process mutex on the state store; if the pid is stable, that can be simplified. |
-| `process.uptimeSeconds` | Resets to ~0 → the pool is idle-stopping. Tells you how aggressive it is. |
+| `process.uptimeSeconds` | Resets to ~0 → the pool is idle-stopping. Tells you how aggressive it is, and decides whether the [background ticker](#background-ticker-r12) needs `SelfPingUrl` to survive a quiet night. |
+| `backgroundTicker.ticks` | Climbing while `presence.online` is 0 → the timer works on this host. Back at a low number after a quiet spell → the pool stopped and killed it. |
 | `process.framework` | Confirms which runtime the host actually loaded. |
 | `storage.appDataWritable` | `false` → de-duplication and the outbox cannot persist. Hard blocker; `appDataError` says why. |
 | `request.isHttps` / `forwardedProto` | Must be correct before setting `RequireHttps=true`, or the relay 403s every client. |
@@ -485,8 +562,10 @@ same per-key bucket as `/chat` and `/messages`, which one ping a minute per clie
 
 ### `POST /heartbeat`
 
-Authenticated. Drains the outbox and keeps the app pool warm; returns `{ "outbox": <depth> }`.
-Pointing a pinger at it (with the key) both prevents cold starts and delivers anything a Discord
-rate limit parked when no chat followed it. It also carries the **bot-command scan**, which is what
-makes `@bot status` answerable when no players are online at all — with no other traffic, the
-pinger's interval is the bot's response time.
+Authenticated. Drains the outbox, sweeps the channel and carries the bot-command scan — the same
+work as one [background tick](#background-ticker-r12) — and returns `{ "outbox": <depth> }`.
+
+Since the ticker exists this is no longer the only way to get that work done with nobody in game,
+but it stays useful for two things the ticker cannot do: an **external** pinger (with the key) is
+an inbound request, so it also prevents the app pool idle-stopping, and it is the manual way to
+force a drain or a scan right now.
