@@ -93,6 +93,20 @@ builder.Services.AddSingleton<ChannelCleaner>();
 builder.Services.AddSingleton<PresenceTracker>();
 builder.Services.AddSingleton<BotCommandScanner>();
 
+// The background ticker (R12): the same work a request carries, run on a timer so it still happens
+// with nobody in game. Registered as a singleton AND as the hosted service so /health can report
+// whether it is actually alive — the question shared hosting exists to make interesting.
+builder.Services.AddSingleton<BackgroundTicker>();
+builder.Services.AddHostedService(services => services.GetRequiredService<BackgroundTicker>());
+
+builder.Services.AddHttpClient(BackgroundTicker.HttpClientName, client =>
+{
+    // Short: a self-ping that hangs would stall the tick it is attached to, and the response body
+    // is discarded anyway. Its only job is to be an inbound request.
+    client.Timeout = TimeSpan.FromSeconds(5);
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("GalaxyExtenderRelay/0.4 (+https://github.com/Lotok82)");
+});
+
 builder.Services.AddHttpClient(DiscordPublisher.HttpClientName, client =>
 {
     client.Timeout = TimeSpan.FromSeconds(10);
