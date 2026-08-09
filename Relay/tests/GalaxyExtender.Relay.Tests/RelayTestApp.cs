@@ -46,6 +46,10 @@ public class RelayTestApp : WebApplicationFactory<Program>
                 ["Relay:MaxLinesPerBatch"] = "50",
                 ["Relay:MaxLineLength"] = "512",
                 ["Relay:StateFilePath"] = _statePath,
+                // Off unless a test asks for it. A timer firing mid-assertion would make every
+                // "how many Discord calls did that request make" test in the suite racy, and the
+                // ticker's own behaviour is worth testing deliberately rather than everywhere.
+                ["Relay:BackgroundTickSeconds"] = "0",
                 // High enough that the suite cannot trip the limiter by accident; the limiter has
                 // its own dedicated test that sets it low.
                 ["Relay:RateLimitPermitsPerMinute"] = "10000",

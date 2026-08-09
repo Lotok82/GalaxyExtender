@@ -17,6 +17,7 @@ public static class HealthEndpoints
             IOptions<DiscordOptions> discordOptions,
             IStateStore stateStore,
             PresenceTracker presenceTracker,
+            BackgroundTicker ticker,
             HttpContext http) =>
         {
             var now = DateTimeOffset.UtcNow;
@@ -101,6 +102,23 @@ public static class HealthEndpoints
                     lastCleanupUtc,
                     lastCommandScanUtc,
                     botUserIdKnown
+                },
+
+                // Is the timer that carries the outbox, the cleanup and the bot when nobody is in
+                // game actually running? This is the reading the whole feature turns on: `ticks`
+                // climbing while `presence.online` is 0 means it works on this host. `ticks` back
+                // at a low number with a fresh `process.uptimeSeconds` means the pool idle-stopped
+                // and killed it — the case Relay:SelfPingUrl exists for.
+                backgroundTicker = new
+                {
+                    enabled = ticker.Enabled,
+                    intervalSeconds = relayOptions.Value.BackgroundTickSeconds,
+                    ticks = ticker.Ticks,
+                    lastTickUtc = ticker.LastTickUtc,
+                    lastError = ticker.LastError,
+                    // Whether, not where: the URL is the operator's business and this document is
+                    // unauthenticated.
+                    selfPing = !string.IsNullOrWhiteSpace(relayOptions.Value.SelfPingUrl)
                 },
 
                 // Who the relay believes is running the extension — the same figures the Discord
