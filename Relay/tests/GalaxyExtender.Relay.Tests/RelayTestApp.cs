@@ -26,6 +26,12 @@ public class RelayTestApp : WebApplicationFactory<Program>
     public FakeDiscordHandler Discord { get; } = new();
 
     /// <summary>
+    /// The far end of the background ticker's self-ping. Stubbed for every test host, not just the
+    /// ones that switch the ping on, so that no test can reach the network by accident.
+    /// </summary>
+    public FakeSelfPingHandler SelfPing { get; } = new();
+
+    /// <summary>
     /// Per-test settings, applied after the defaults so they win. A protected hook rather than a
     /// constructor parameter because several test classes take this host as an xUnit CLASS FIXTURE,
     /// and xUnit rejects a fixture type with more than one public constructor — see
@@ -68,6 +74,9 @@ public class RelayTestApp : WebApplicationFactory<Program>
         {
             services.AddHttpClient(DiscordPublisher.HttpClientName)
                 .ConfigurePrimaryHttpMessageHandler(() => Discord);
+
+            services.AddHttpClient(BackgroundTicker.HttpClientName)
+                .ConfigurePrimaryHttpMessageHandler(() => SelfPing);
         });
     }
 

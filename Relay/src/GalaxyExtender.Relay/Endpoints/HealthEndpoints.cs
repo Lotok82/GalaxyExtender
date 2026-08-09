@@ -118,7 +118,13 @@ public static class HealthEndpoints
                     lastError = ticker.LastError,
                     // Whether, not where: the URL is the operator's business and this document is
                     // unauthenticated.
-                    selfPing = !string.IsNullOrWhiteSpace(relayOptions.Value.SelfPingUrl)
+                    selfPing = !string.IsNullOrWhiteSpace(relayOptions.Value.SelfPingUrl),
+                    // Configured is not the same as working, and only this says which. A wrong
+                    // SelfPingUrl otherwise fails silently for ever — the ticker keeps reporting
+                    // healthy right up until the idle timer it was meant to defeat kills it. The
+                    // detail can name the host it tried, which is the relay's own public address
+                    // and no more sensitive than `storage.appDataError` already published here.
+                    selfPingError = ticker.SelfPingError
                 },
 
                 // Who the relay believes is running the extension — the same figures the Discord
