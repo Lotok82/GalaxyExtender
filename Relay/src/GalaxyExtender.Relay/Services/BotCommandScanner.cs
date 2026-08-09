@@ -8,13 +8,13 @@ namespace GalaxyExtender.Relay.Services;
 /// <summary>
 /// The bridge bot answering <c>@GalaxyExtender status</c> in the bridge channel (R11).
 ///
-/// There is no gateway connection and no background worker on this host, so "the bot is listening"
-/// is really "the relay reads the channel on the back of request traffic" — chat POSTs, Stage 2
-/// polls, presence pings and the heartbeat, at most once per
+/// There is no gateway connection, so "the bot is listening" is really "the relay reads the channel
+/// whenever something drives it" — chat POSTs, Stage 2 polls, presence pings, the heartbeat, and
+/// the <see cref="BackgroundTicker"/> — at most once per
 /// <see cref="RelayOptions.CommandScanIntervalSeconds"/>, claimed atomically through the durable
-/// <see cref="RelayState.LastCommandScanUtc"/> stamp exactly like the cleanup sweep. The heartbeat
-/// pinger is what makes "status" answerable when nobody is online at all — which is precisely when
-/// somebody asks.
+/// <see cref="RelayState.LastCommandScanUtc"/> stamp exactly like the cleanup sweep. The ticker is
+/// what makes "status" answerable when nobody is online at all — which is precisely when somebody
+/// asks, and why the scan cannot be left to player traffic alone.
 ///
 /// The scan keeps its OWN cursor, independent of the Stage 2 reader's, for two reasons: the status
 /// command has to work with the Stage 2 read path switched off (asking whether the bridge is live is

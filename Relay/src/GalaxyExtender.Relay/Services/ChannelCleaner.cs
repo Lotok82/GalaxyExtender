@@ -11,12 +11,12 @@ namespace GalaxyExtender.Relay.Services;
 /// live ticker, not an archive — anything hours old was long since delivered (the Stage 2 TTL is
 /// minutes) or read.
 ///
-/// There is no background worker on this host, so the sweep piggybacks on authenticated request
-/// traffic (chat POST, heartbeat, Stage 2 poll), throttled by a durable
+/// The sweep piggybacks on authenticated request traffic (chat POST, heartbeat, Stage 2 poll) and
+/// on the <see cref="BackgroundTicker"/>, throttled by a durable
 /// <see cref="RelayState.LastCleanupUtc"/> stamp — at most one sweep per
-/// <see cref="RelayOptions.CleanupIntervalMinutes"/>, claimed atomically so concurrent requests
-/// cannot both pay for one. When nobody is online the sweep pauses until the next request; the
-/// heartbeat pinger covers that gap the same way it covers the outbox.
+/// <see cref="RelayOptions.CleanupIntervalMinutes"/>, claimed atomically so a request and a tick
+/// cannot both pay for one. The timer is what keeps the channel tidy through a night with nobody
+/// online; the request path remains as the answer for a host that idle-stops the timer away.
 ///
 /// One sweep is deliberately bounded: one page fetch (≤100 messages, newest-old-enough first) and
 /// one bulk-delete. A backlog beyond that self-heals across sweeps, because deleting a page makes

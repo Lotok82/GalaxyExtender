@@ -165,6 +165,45 @@ public sealed class RelayOptions
     /// </summary>
     public int DeliveryNoticeIntervalMinutes { get; set; } = 15;
 
+    // ------------------------------------------------------------------
+    // Background ticker (R12). The only work in the relay that does not
+    // wait to be asked. See Services/BackgroundTicker.cs.
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Seconds between background ticks. A tick runs the outbox drain, the cleanup sweep and the
+    /// bot-command scan — exactly what <c>POST /heartbeat</c> runs — so that they still happen when
+    /// there is no request traffic at all, which is to say when nobody is in game.
+    ///
+    /// <c>0</c> disables the ticker, restoring the purely request-driven behaviour that shipped
+    /// before it. Values are clamped to 1 s–1 h.
+    ///
+    /// 60 s is chosen against <see cref="CommandMaxAgeSeconds"/>, not against how fresh anything
+    /// feels: a mention older than that gets no reply, so a tick slower than 5 minutes would leave
+    /// the bot answering nothing at exactly the times this exists for. It also bounds the cost —
+    /// the per-piece interval stamps mean a tick inside their windows is a few in-memory reads, so
+    /// the steady-state Discord traffic while the guild is empty is one channel read per
+    /// <see cref="CommandScanIntervalSeconds"/>, not one per tick.
+    /// </summary>
+    public double BackgroundTickSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Absolute URL the ticker GETs once per tick, or empty for none. Intended value is the
+    /// relay's own public health document — <c>https://host/relay/api/v1/health</c> — which is
+    /// unauthenticated and does no outbound work.
+    ///
+    /// This is a workaround for one specific host behaviour and nothing else: IIS idle-stops a
+    /// worker process that has gone <see cref="!:idleTimeout"/> without a REQUEST, and background
+    /// CPU activity does not count, so on such a host the ticker is killed by the very quiet
+    /// period it was added for. An inbound request is the only thing that resets that timer.
+    ///
+    /// Off by default because it is not free — it is an outbound call per tick, and on a host
+    /// that does not idle-stop (or where the pool is set to <c>idleTimeout=0</c>) it buys nothing.
+    /// Turn it on only after <c>/health</c> shows the pool actually stopping: read
+    /// <c>process.uptimeSeconds</c> resetting, or <c>backgroundTicker.ticks</c> starting over.
+    /// </summary>
+    public string? SelfPingUrl { get; set; }
+
     /// <summary>
     /// The set of currently valid API keys, as <c>label -> secret</c>. The label is for the
     /// operator's benefit only (it names the key in logs); it is NOT matched against the client id
