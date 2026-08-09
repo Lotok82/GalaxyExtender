@@ -180,10 +180,17 @@ public sealed class RelayOptions
     ///
     /// 60 s is chosen against <see cref="CommandMaxAgeSeconds"/>, not against how fresh anything
     /// feels: a mention older than that gets no reply, so a tick slower than 5 minutes would leave
-    /// the bot answering nothing at exactly the times this exists for. It also bounds the cost —
-    /// the per-piece interval stamps mean a tick inside their windows is a few in-memory reads, so
-    /// the steady-state Discord traffic while the guild is empty is one channel read per
-    /// <see cref="CommandScanIntervalSeconds"/>, not one per tick.
+    /// the bot answering nothing at exactly the times this exists for.
+    ///
+    /// Cost at the shipped defaults, since a shared host is the constraint: each piece keeps its own
+    /// durable interval stamp, so a tick arriving inside a piece's window costs a couple of
+    /// in-memory reads. The cleanup sweep is genuinely in that position — its window is
+    /// <see cref="CleanupIntervalMinutes"/>, far longer than a tick. The command scan is NOT: at 60 s
+    /// per tick against a <see cref="CommandScanIntervalSeconds"/> of 15 the scan is due on every
+    /// tick, so the real steady state with the guild empty is ONE channel read and ONE state-file
+    /// write per tick — 60/hour — because claiming the scan stamps it durably. That is the floor
+    /// this feature costs; raising the tick interval lowers it, at the price of the bot's response
+    /// time. Only a tick faster than <see cref="CommandScanIntervalSeconds"/> gets the free ride.
     /// </summary>
     public double BackgroundTickSeconds { get; set; } = 60;
 

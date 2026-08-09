@@ -51,10 +51,20 @@ public sealed class BackgroundTicker(
     private long _ticks;
     private long _lastTickTicksUtc;
     private volatile string? _lastError;
-    private bool _selfPingFailing;
+    private volatile string? _selfPingError;
+    private volatile bool _running;
+    private bool _selfPingLogged;
 
-    /// <summary>Whether the ticker is configured to run at all (0 or less disables it).</summary>
-    public bool Enabled => Interval() is not null;
+    /// <summary>
+    /// Whether the loop is actually running — deliberately the loop's own state, not a re-read of
+    /// the configured interval. The two can disagree: switching the interval to 0 at runtime stops
+    /// the loop for good (<see cref="BackgroundService"/> never restarts it), so a config that said
+    /// "enabled" would report a ticker that no longer exists — and a frozen <see cref="Ticks"/>
+    /// alongside it reads exactly like the pool having idle-stopped, sending the operator after the
+    /// wrong problem. Restoring a non-zero interval therefore needs an app restart, which on IIS is
+    /// what editing appsettings or an environment variable does anyway.
+    /// </summary>
+    public bool Enabled => _running;
 
     /// <summary>Completed ticks since app start. In-memory: a recycle resets it, which is useful —
     /// compared against process uptime it says whether the ticker survived the quiet hours.</summary>
@@ -74,6 +84,16 @@ public sealed class BackgroundTicker(
     /// <summary>The last tick's failure, or null if the last tick was clean.</summary>
     public string? LastError => _lastError;
 
+    /// <summary>
+    /// The last self-ping's failure, or null if it succeeded or none is configured. Reported
+    /// separately from <see cref="LastError"/> because the two mean opposite things: a tick error
+    /// says the relay's own work is failing, a self-ping error says the KEEP-ALIVE is failing and
+    /// the ticker may be about to be idle-stopped out of existence. Without this the setting an
+    /// operator reaches for when the ticker is dying — and the one most likely to be mistyped —
+    /// has no reading anywhere but a log file that is awkward to reach on shared hosting.
+    /// </summary>
+    public string? SelfPingError => _selfPingError;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (Interval() is not { } interval)
@@ -88,36 +108,47 @@ public sealed class BackgroundTicker(
         logger.LogInformation("Background ticker started at {Interval:0.##} s intervals",
             interval.TotalSeconds);
 
-        // Delay BEFORE the first tick, not after: a recycle under load must not add a burst of
-        // Discord calls to whatever caused it, and the request that woke the app has already
-        // carried this work.
-        while (!stoppingToken.IsCancellationRequested)
+        // Set before the first await, so it is already true when StartAsync returns and /health
+        // cannot catch a started host reporting a ticker that has not begun.
+        _running = true;
+
+        try
         {
-            try
+            // Delay BEFORE the first tick, not after: a recycle under load must not add a burst of
+            // Discord calls to whatever caused it, and the request that woke the app has already
+            // carried this work.
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await Task.Delay(interval, stoppingToken);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
+                try
+                {
+                    await Task.Delay(interval, stoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
 
-            if (stoppingToken.IsCancellationRequested)
-            {
-                return;
+                if (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                await TickAsync(stoppingToken);
+
+                if (Interval() is not { } current)
+                {
+                    // Switched off under us by a config reload. Stopping the loop rather than idling
+                    // in it means the "disabled" state is one thing, not two.
+                    logger.LogInformation("Background ticker stopping: interval set to 0");
+                    return;
+                }
+
+                interval = current;
             }
-
-            await TickAsync(stoppingToken);
-
-            if (Interval() is not { } current)
-            {
-                // Switched off under us by a config reload. Stopping the loop rather than idling
-                // in it means the "disabled" state is one thing, not two.
-                logger.LogInformation("Background ticker stopping: interval set to 0");
-                return;
-            }
-
-            interval = current;
+        }
+        finally
+        {
+            _running = false;
         }
     }
 
@@ -144,12 +175,16 @@ public sealed class BackgroundTicker(
             logger.LogWarning(ex, "Background tick failed");
         }
 
-        // Outside the block above so a Discord failure never costs us the thing that keeps the
-        // pool alive — which, if it stops, costs us every future tick rather than this one.
-        await SelfPingAsync(cancellationToken);
-
+        // Counted before the self-ping, not after. `ticks` is the one reading that separates "the
+        // host killed the ticker" from "the ticker is alive and something inside it is failing";
+        // an optional keep-alive must not be able to blur that distinction by freezing the counter.
         Interlocked.Increment(ref _ticks);
         Interlocked.Exchange(ref _lastTickTicksUtc, DateTimeOffset.UtcNow.UtcTicks);
+
+        // Outside the block above so a Discord failure never costs us the thing that keeps the
+        // pool alive — which, if it stops, costs us every future tick rather than this one.
+        // SelfPingAsync swallows everything itself; see the catch there for why it must.
+        await SelfPingAsync(cancellationToken);
     }
 
     /// <summary>
@@ -163,6 +198,10 @@ public sealed class BackgroundTicker(
     {
         if (options.CurrentValue.SelfPingUrl is not { } url || string.IsNullOrWhiteSpace(url))
         {
+            // Cleared, not left standing: a URL removed after a failure must not leave a stale
+            // error on /health describing a ping that is no longer even attempted.
+            _selfPingError = null;
+            _selfPingLogged = false;
             return;
         }
 
@@ -177,45 +216,74 @@ public sealed class BackgroundTicker(
                 return;
             }
 
-            if (_selfPingFailing)
+            if (_selfPingLogged)
             {
                 logger.LogInformation("Self-ping recovered");
-                _selfPingFailing = false;
+                _selfPingLogged = false;
             }
+
+            _selfPingError = null;
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or UriFormatException
-                                       or InvalidOperationException)
+        catch (Exception ex)
         {
+            // Shutting down. Not a failure, and reporting it would leave a misleading error
+            // sitting on /health for whatever reads it during the stop.
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            // Deliberately unfiltered, and this is the whole reason the method has its own handler.
+            // Anything escaping here escapes ExecuteAsync too, and .NET's default
+            // BackgroundServiceExceptionBehavior.StopHost would then take the ENTIRE relay down —
+            // request path included — over an optional workaround for one host's idle timer. A
+            // listed set of exception types is not good enough: HttpClient answers an absolute URL
+            // with an unsupported scheme (`htp://…`, a plausible typo) with NotSupportedException,
+            // which no such list would have thought to include. The cost of being wrong here is
+            // total, so nothing gets through.
             ReportSelfPing($"{ex.GetType().Name}: {ex.Message}");
         }
     }
 
     /// <summary>
-    /// Logs a self-ping failure once per outage rather than once per tick. A wrong URL would
-    /// otherwise write a warning every interval, for ever, and drown the log the operator needs.
+    /// Records a self-ping failure for <c>/health</c> every time, but LOGS it only once per outage:
+    /// a wrong URL would otherwise write a warning every interval, for ever, and drown the log the
+    /// operator needs. The <c>/health</c> field carries no such risk and is what the README sends
+    /// people to, so it always reflects the latest attempt.
     /// </summary>
     private void ReportSelfPing(string detail)
     {
-        if (_selfPingFailing)
+        _selfPingError = detail;
+
+        if (_selfPingLogged)
         {
             return;
         }
 
-        _selfPingFailing = true;
+        _selfPingLogged = true;
         logger.LogWarning("Self-ping failed ({Detail}); the app pool may idle-stop when nobody is " +
                           "playing. Check Relay:SelfPingUrl", detail);
     }
 
-    /// <summary>The configured interval, floored, or null when the ticker is switched off.</summary>
-    private TimeSpan? Interval()
-    {
-        var seconds = options.CurrentValue.BackgroundTickSeconds;
+    /// <summary>The configured interval, clamped, or null when the ticker is switched off.</summary>
+    private TimeSpan? Interval() => ClampInterval(options.CurrentValue.BackgroundTickSeconds);
 
-        if (seconds <= 0 || double.IsNaN(seconds))
+    /// <summary>
+    /// Turns a configured <see cref="RelayOptions.BackgroundTickSeconds"/> into the interval the
+    /// loop will actually use, or null for "switched off". Public because it is the guard between a
+    /// mistyped config value and a timer that hammers the state file and Discord's rate limiter, and
+    /// that guard deserves to be asserted directly rather than inferred from how fast a test ticks.
+    /// </summary>
+    public static TimeSpan? ClampInterval(double seconds)
+    {
+        // NaN first: every comparison against it is false, so a later `<` test would silently let
+        // it through into TimeSpan.FromSeconds, which throws.
+        if (double.IsNaN(seconds) || seconds <= 0)
         {
             return null;
         }
 
+        // Also catches PositiveInfinity, which would otherwise overflow TimeSpan.FromSeconds.
         if (seconds >= MaximumInterval.TotalSeconds)
         {
             return MaximumInterval;
