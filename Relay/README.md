@@ -468,8 +468,11 @@ characters, Discord's `content` ceiling). Guild lines already arrive carrying th
 so that a *boxed* message means something — the world boss alert feed keeps the embed and colours its
 bar. Two consequences worth knowing: `allowed_mentions: {"parse": []}` is now the actual ping
 guarantee rather than a second layer (an embed cannot ping whatever it holds; `content` can), and
-`[`/`]` are deliberately left unescaped on this path because plain messages render brackets literally
-— escaping them only published visible backslashes. The embed path still escapes them, and must.
+`[`/`]` are deliberately left unescaped on this path so the `[GuildChat]` prefix reads cleanly —
+an **accepted risk**, not a free lunch: webhook-authored `content` *does* render `[text](url)` as a
+masked link (only human-typed messages show the brackets literally), so a player can post a
+disguised link into this private, trusted channel. Revisit before pointing the relay at a public
+one. The embed path still escapes brackets, and must.
 Everything else is unchanged: SWG escapes
 stripped, Discord markdown escaped, and `@everyone`/`@here` neutralised with a zero-width joiner.
 

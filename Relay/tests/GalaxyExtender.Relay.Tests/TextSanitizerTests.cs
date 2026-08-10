@@ -62,9 +62,11 @@ public sealed class TextSanitizerTests
     }
 
     /// <summary>
-    /// The other half of that rule. A plain message renders brackets literally, so escaping them
-    /// buys no safety and costs legibility: guild lines arrive from the game already carrying a
-    /// "[GuildChat] " prefix, which would otherwise publish as "\[GuildChat\] ".
+    /// The other half of that rule — an accepted risk, not a safe case. Webhook-authored content
+    /// DOES render masked links, so an unescaped [text](url) in guild chat is clickable; that is
+    /// tolerated (private guild, trusted members — decision of 2026-08-10) because escaping would
+    /// publish visible backslashes around the game-supplied "[GuildChat] " prefix on every line.
+    /// See the DiscordTarget doc.
     /// </summary>
     [Fact]
     public void ForDiscord_leaves_brackets_alone_in_a_plain_message()

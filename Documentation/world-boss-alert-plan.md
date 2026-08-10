@@ -3,7 +3,7 @@
 Status: **BUILT END TO END (steps 1–3, 2026-08-10) — NOT DEPLOYED, NOT YET SEEN IN GAME.** On branch
 `worldbossalert`: step 1 guild chat as plain text, step 2 the relay alert feed behind a default-off
 `Discord:AlertsEnabled`, step 3 the extension gate (`alerts` / `alert_channel_types` / `alert_tags`
-ini keys, default `{5, 11}` and the two World Boss tags). 259 relay tests, 91 harness checks, DLL
+ini keys, default `{5, 11}` and the two World Boss tags). 261 relay tests, 93 harness checks, DLL
 clean in Debug and Release x86.
 
 What remains is steps 4–5: deploy the relay, set `"AlertsEnabled": true`, roll the DLL, and confirm at
@@ -210,11 +210,13 @@ bar**, which is what the existing code already does and renders identically ever
   ([TextSanitizer.cs:19](../Relay/src/GalaxyExtender.Relay/Services/TextSanitizer.cs#L19)) is Discord's embed
   ceiling; `content` allows only 2000. `BuildDescriptions` needs the limit as a parameter rather than a
   constant.
-- `[` and `]` no longer need escaping **on this path**. They are escaped today for a reason that applies
-  only to embeds — embed descriptions render `[text](url)` as a masked hyperlink, plain messages render the
-  brackets literally ([TextSanitizer.cs:95-98](../Relay/src/GalaxyExtender.Relay/Services/TextSanitizer.cs#L95-L98)).
-  Everything else — `\`, `` ` ``, `*`, `_`, `~`, `|` escaping and the `@everyone`/`@here` zero-width rewrite
-  — must stay.
+- `[` and `]` are left unescaped **on this path** so the `[GuildChat]` prefix reads cleanly. **Correction
+  to the original rationale** (post-review, 2026-08-10): plain messages do *not* render brackets literally
+  when the author is a webhook — Discord renders masked links in bot/webhook `content` too, so an
+  unescaped `[text](url)` typed by a player stays clickable. Accepted deliberately for this private,
+  trusted guild channel; see the `DiscordTarget` doc in
+  [TextSanitizer.cs](../Relay/src/GalaxyExtender.Relay/Services/TextSanitizer.cs). Everything else — `\`,
+  `` ` ``, `*`, `_`, `~`, `|` escaping and the `@everyone`/`@here` zero-width rewrite — must stay.
 - **`allowed_mentions: {"parse": []}` becomes load-bearing.** Embeds never ping anyone regardless; plain
   `content` does. The lockdown is already sent on every POST
   ([DiscordPublisher.cs](../Relay/src/GalaxyExtender.Relay/Services/DiscordPublisher.cs)) so behaviour is

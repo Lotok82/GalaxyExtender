@@ -78,8 +78,9 @@ public static class TextSanitizer
     /// 3. clamp to <paramref name="maxLength"/> characters.
     ///
     /// <paramref name="target"/> is not a style preference — it decides whether bracket escaping
-    /// happens, and only one of the two answers is safe per destination. There is no default: a
-    /// call site that has not thought about it is exactly the one that gets it wrong.
+    /// happens, and the two destinations made different safety/legibility trade-offs (see
+    /// <see cref="DiscordTarget"/>). There is no default: a call site that has not thought about
+    /// it is exactly the one that gets it wrong.
     /// </summary>
     public static string ForDiscord(string normalized, int maxLength, DiscordTarget target)
     {
@@ -103,10 +104,10 @@ public static class TextSanitizer
                     builder.Append('\\').Append(c);
                     break;
 
-                // EMBED descriptions render [text](url) as a masked hyperlink, which would let a
-                // player publish a link whose visible text hides the target — authored by the
-                // relay. Plain messages render the brackets literally, so escaping them there only
-                // puts visible backslashes around things like the [GuildChat] prefix.
+                // [text](url) renders as a masked hyperlink in an embed description AND — because
+                // the sender is a webhook, not a human — in plain message content too. Escaping is
+                // kept mandatory for embeds and deliberately skipped for plain messages: see the
+                // DiscordTarget doc for the accepted risk and why.
                 case '[' or ']' when target == DiscordTarget.Embed:
                     builder.Append('\\').Append(c);
                     break;
@@ -196,17 +197,25 @@ public static class TextSanitizer
 }
 
 /// <summary>
-/// Which kind of Discord message sanitised text is bound for. The two differ in one dangerous
-/// way: an embed description renders <c>[text](url)</c> as a masked hyperlink, a plain message
-/// renders the brackets literally. Escaping brackets for a plain message is merely ugly; NOT
-/// escaping them for an embed lets player-authored text publish a disguised link under the
-/// relay's own name.
+/// Which kind of Discord message sanitised text is bound for; it selects the bracket policy.
+///
+/// An embed description renders <c>[text](url)</c> as a masked hyperlink, so the embed path
+/// escapes brackets unconditionally — a disguised link there would publish under the relay's own
+/// name, and escaping costs nothing visible (Discord consumes the backslashes).
+///
+/// IMPORTANT — plain messages are NOT the safe case they look like: masked links are rendered in
+/// <c>content</c> too when the author is a webhook or bot (only human-typed messages show the
+/// brackets literally). Leaving brackets unescaped therefore lets a player's <c>[text](url)</c>
+/// render as a clickable masked link in guild chat. This is an ACCEPTED RISK, decided 2026-08-10:
+/// the channel is a small private guild of trusted members, and escaping would put visible
+/// backslashes around the game-supplied "[GuildChat]" prefix on every line. Revisit before ever
+/// pointing this relay at a public or untrusted channel.
 /// </summary>
 public enum DiscordTarget
 {
     /// <summary>An embed description. Brackets MUST be escaped.</summary>
     Embed,
 
-    /// <summary>A message's <c>content</c>. Brackets render literally and are left alone.</summary>
+    /// <summary>A message's <c>content</c>. Brackets left alone — see the accepted risk above.</summary>
     PlainMessage
 }

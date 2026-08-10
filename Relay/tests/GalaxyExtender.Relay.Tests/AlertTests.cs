@@ -198,6 +198,33 @@ public sealed class AlertTests
     }
 
     /// <summary>
+    /// When one configured tag is a prefix of another, the longest match owns the line. Without
+    /// the explicit ordering this was dictionary enumeration order — nondeterministic, so the
+    /// same alert could change colour between deploys.
+    /// </summary>
+    [Fact]
+    public async Task Overlapping_tags_resolve_to_the_longest_match()
+    {
+        using var app = AppWithAlerts(
+            ("Discord:AlertTags:[Boss]", "255"),
+            ("Discord:AlertTags:[Boss Elite]", "16711680"));
+        var client = app.CreateAuthenticatedClient();
+
+        await client.PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[Boss Elite] Bloodfin has spawned!")));
+        await client.PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[Boss] a lesser boss has spawned!")));
+
+        Assert.Equal(2, app.Discord.RequestBodies.Count);
+
+        var elite = JsonDocument.Parse(app.Discord.RequestBodies[0]).RootElement;
+        var plain = JsonDocument.Parse(app.Discord.RequestBodies[1]).RootElement;
+
+        Assert.Equal(16711680, elite.GetProperty("embeds")[0].GetProperty("color").GetInt32());
+        Assert.Equal(255, plain.GetProperty("embeds")[0].GetProperty("color").GetInt32());
+    }
+
+    /// <summary>
     /// A tag a client gates on but the relay does not know publishes as ordinary chat. Unstyled is
     /// the intended degradation; dropped would not be.
     /// </summary>

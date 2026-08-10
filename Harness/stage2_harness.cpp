@@ -484,6 +484,8 @@ static void checkAlertGate() {
 	CHECK(!DiscordBridge::isAlertChannel(5), "alerts=0 stops channels being scanned");
 
 	// --- a malformed list must fail loudly, not silently retarget the scan ---
+	// "Loudly" means alerts OFF with the reason in status. It must NOT invalidate
+	// the whole config: guild-chat relaying keeps working while the typo is fixed.
 
 	writeAlertIni("alert_channel_types=5,guild\n");
 	DiscordBridge::setEnabled(true);
@@ -492,6 +494,10 @@ static void checkAlertGate() {
 	DiscordBridge::appendStatus(status);
 	CHECK(status.find("alert_channel_types") != std::string::npos,
 		"a non-numeric alert_channel_types is reported as a config error");
+	CHECK(status.find("not configured") == std::string::npos,
+		"a malformed alert list does not take down the whole bridge");
+	CHECK(!DiscordBridge::isAlertChannel(5),
+		"alerts stay off while the list is malformed");
 
 	DiscordBridge::setEnabled(false);
 }

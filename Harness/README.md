@@ -19,7 +19,8 @@ Two modes:
   **world boss alert gate** checks (`isAlertLine` / `isAlertChannel`): tag matching including case,
   the start-anchored anti-spoof rule, ordinary system messages ignored, the `alert_tags` /
   `alert_channel_types` ini overrides REPLACING their defaults, `alerts=0`, and a non-numeric
-  channel list reported as a config error. **91 checks.**
+  channel list switching alerts off with the reason in status — while the rest of the bridge
+  keeps running. **93 checks.**
 
   Those gate checks run at the end of `testLiveLoop` rather than as their own top-level test on
   purpose: they reload configuration through `setEnabled(true)`, which touches the bridge lock, so
