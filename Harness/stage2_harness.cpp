@@ -400,6 +400,102 @@ static void testRewrite() {
 // Live loop against the scripted stub
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Unit tests: the world boss alert gate
+//
+// Runs AFTER testLiveLoop so the configuration is already loaded, then reloads
+// it via setEnabled(true) to check the ini overrides. See
+// Documentation/world-boss-alert-plan.md.
+// ---------------------------------------------------------------------------
+
+static bool isAlert(const wchar_t* text) {
+	return DiscordBridge::isAlertLine(text, wcslen(text));
+}
+
+static void writeAlertIni(const char* extraKeys) {
+	wchar_t path[MAX_PATH];
+	GetModuleFileNameW(nullptr, path, MAX_PATH);
+	wchar_t* slash = wcsrchr(path, L'\\');
+	slash[1] = 0;
+	std::wstring ini(path);
+	ini += L"DiscordBridge.ini";
+
+	FILE* file = nullptr;
+	_wfopen_s(&file, ini.c_str(), L"w");
+	fprintf(file,
+		"[DiscordBridge]\n"
+		"enabled=1\n"
+		"endpoint=http://127.0.0.1:%u/relay\n"
+		"key=harness-test-key\n"
+		"client_id=harness\n"
+		"allow_http=1\n"
+		"stage2=0\n"
+		"%s",
+		STUB_PORT, extraKeys);
+	fclose(file);
+}
+
+static void checkAlertGate() {
+	printf("world boss alert gate:\n");
+
+	// --- Defaults (no alert keys in the ini) ---
+
+	CHECK(isAlert(L"[PvE World Boss] a Krayt Dragon has spawned!"), "PvE tag matches");
+	CHECK(isAlert(L"[PvP World Boss] Bloodfin has spawned!"), "PvP tag matches");
+	CHECK(isAlert(L"[PVP WORLD BOSS] shouting"), "tag match ignores case (upper)");
+	CHECK(isAlert(L"[pve world boss] whispering"), "tag match ignores case (lower)");
+
+	// The anti-spoof rule. A player typing the tag in guild or spatial chat
+	// always arrives with their name in front, so it can never match.
+	CHECK(!isAlert(L"Kaelen: [PvP World Boss] gotcha"), "player-prefixed tag is not an alert");
+	CHECK(!isAlert(L"[GuildChat] Kaelen: [PvE World Boss] nope"), "guild-prefixed tag is not an alert");
+	CHECK(!isAlert(L" [PvE World Boss] leading space"), "tag must be at position 0");
+
+	// Everything else on a scanned channel is the player's own business.
+	CHECK(!isAlert(L"You have completed your mission."), "ordinary system message ignored");
+	CHECK(!isAlert(L"[PvX World Boss] unknown tag"), "unknown tag ignored");
+	CHECK(!isAlert(L""), "empty line ignored");
+	CHECK(!isAlert(L"[PvE World Bos]"), "truncated tag ignored");
+	CHECK(isAlert(L"[PvE World Boss]"), "bare tag with no body still matches");
+
+	CHECK(DiscordBridge::isAlertChannel(5), "CT_systemMessage scanned by default");
+	CHECK(DiscordBridge::isAlertChannel(11), "CT_quest scanned by default");
+	CHECK(!DiscordBridge::isAlertChannel(4), "CT_combat not scanned (volume)");
+	CHECK(!DiscordBridge::isAlertChannel(2), "CT_spatial not scanned (spoofable)");
+	CHECK(!DiscordBridge::isAlertChannel(9), "guild type is not in the alert list");
+
+	// --- ini overrides REPLACE the defaults rather than adding to them ---
+
+	writeAlertIni("alert_tags=[Server],[Invasion]\nalert_channel_types=3\n");
+	DiscordBridge::setEnabled(true);   // reloads config
+
+	CHECK(isAlert(L"[Server] restarting in 5 minutes"), "configured tag matches");
+	CHECK(isAlert(L"[invasion] Dathomir is under attack"), "second configured tag matches");
+	CHECK(!isAlert(L"[PvE World Boss] retired"), "default tag retired by an override");
+	CHECK(DiscordBridge::isAlertChannel(3), "configured channel scanned");
+	CHECK(!DiscordBridge::isAlertChannel(5), "default channel retired by an override");
+
+	// --- the opt-out ---
+
+	writeAlertIni("alerts=0\n");
+	DiscordBridge::setEnabled(true);
+
+	CHECK(!isAlert(L"[PvE World Boss] a Krayt Dragon has spawned!"), "alerts=0 gates everything off");
+	CHECK(!DiscordBridge::isAlertChannel(5), "alerts=0 stops channels being scanned");
+
+	// --- a malformed list must fail loudly, not silently retarget the scan ---
+
+	writeAlertIni("alert_channel_types=5,guild\n");
+	DiscordBridge::setEnabled(true);
+
+	std::string status;
+	DiscordBridge::appendStatus(status);
+	CHECK(status.find("alert_channel_types") != std::string::npos,
+		"a non-numeric alert_channel_types is reported as a config error");
+
+	DiscordBridge::setEnabled(false);
+}
+
 static void testLiveLoop() {
 	printf("poll/inject loop vs scripted stub:\n");
 
@@ -588,6 +684,10 @@ static void testLiveLoop() {
 	CHECK(blankLabelId.substr(7) == clientId.substr(8),
 		"same machine fingerprint underlies both forms");
 
+	// Alert gate: reuses this function's live bridge deliberately. It reloads
+	// config via setEnabled(true), which is only safe before the shutdown below.
+	checkAlertGate();
+
 	writeIni();
 
 	// Teardown.
@@ -650,6 +750,10 @@ static int liveMode(const wchar_t* iniSource) {
 }
 
 int main(int argc, char** argv) {
+	// Unbuffered: when a check crashes the process, a buffered stdout loses every
+	// line before it and the failure looks like "no output at all".
+	setvbuf(stdout, nullptr, _IONBF, 0);
+
 	printf("=== DiscordBridge Stage 2 harness ===\n");
 
 	if (argc >= 3 && strcmp(argv[1], "live") == 0) {
@@ -660,7 +764,7 @@ int main(int argc, char** argv) {
 
 	testParse();
 	testRewrite();
-	testLiveLoop();
+	testLiveLoop();   // ends by running the alert-gate checks on its live bridge
 
 	printf("=== %d checks, %d failure(s) ===\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;
