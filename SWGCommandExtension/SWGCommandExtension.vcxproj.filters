@@ -60,6 +60,9 @@
     <ClInclude Include="CuiChatParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="CuiChatRoomManager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="CuiMediatorFactory.h">
       <Filter>Header Files</Filter>
     </ClInclude>

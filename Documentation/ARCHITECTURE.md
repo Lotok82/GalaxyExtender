@@ -206,6 +206,11 @@ The project reimplements SOE's custom STL-like types because the client uses its
 | `0x0102DA80` | `SwgCuiChatWindow::Tab::appendText(const ChannelId&, const Unicode::String&)` — `__thiscall`, `this` = Tab. Chat choke point; every line reaching any tab passes through it. **Hooked** by `SwgCuiChatWindowTab.h` |
 | `0x0102D2D0` | `SwgCuiChatWindow::Tab::hasChannel(const ChannelId&)` |
 | `0x00F364B0` | `SwgCuiChatWindow` constructor (already used by `SwgCuiChatWindow.h`) |
+| `0x01939FB4` | `CuiChatRoomManager::s_guildRoomId` static — set by the server's guild-room auto-join at login, zeroed on guild leave. **Read** each frame (not hooked) by `CuiChatParser::pollClientGuildRoomId` so Stage 2 injection needs no typed line. Hunt: `tools/find_guildroomid.py` / `verify_guildroomid.py`, documented in `CuiChatRoomManager.h` |
+| `0x00A2BAF0` | `CuiChatRoomManager::receiveOnEnteredRoom(const ChatOnEnteredRoom&)` (hunt anchor, not used at runtime) |
+| `0x00A2E260` | `CuiChatRoomManager::getGuildRoomId()` |
+| `0x00A2E7B0` | `CuiChatRoomManager::setGuildRoomId(uint32)` |
+| `0x01939FAC` / `0x01939FB0` | Sibling statics `s_planetRoomId` / `s_groupRoomId` (layout evidence for the hunt) |
 
 ---
 
@@ -451,11 +456,13 @@ than by configuration — `stableClientId` hashes the machine's `MachineGuid` (r
 treats an ini-configured `client_id` as a readable prefix, so a pre-filled ini handed to the whole
 guild cannot collapse the count. It is an accuracy upgrade rather than a prerequisite: the relay already derives presence from
 `/chat` batches and `/messages` polls, so the bot's answer works against DLLs that predate this (DLL
-updates are manual — see the relay README). What the ping adds is the player who is in the world but
-has not typed in the guild tab this session, whose client therefore never polls. It is what lets the
+updates are manual — see the relay README). What the ping adds is the player whose client is not
+otherwise talking to the relay — on current builds a guildless character (no guild room id, so no
+Stage 2 polls; before the guild-room static was adopted, any player who had not typed in the guild
+tab this session was in that position too). It is what lets the
 relay's Discord bot answer a `status` mention with **how many** clients are running — a count, never names, so no player has to fill anything in — and
 nothing else the bridge sends can stand in for it: a batch needs someone to be talking, and the Stage 2 poll is gated on
-`stage2=1` plus a cached guild room id. The frame-tick gate is deliberate: it only ticks in the
+`stage2=1` plus a known guild room id. The frame-tick gate is deliberate: it only ticks in the
 ground scene, so a client parked on the login screen is not reported as logged on. The relay's
 reply (`online`, `known`) is what `status` shows. Contract:
 [Relay/README.md](../Relay/README.md#post-presence--i-am-here).

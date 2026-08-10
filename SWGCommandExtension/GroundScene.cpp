@@ -7,10 +7,17 @@
 #include "InputMap.h"
 #include "FoodDrinkMonitor.h"
 #include "DiscordBridge.h"
+#include "CuiChatParser.h"
 
 void GroundScene::parseMessages(InputMap* map) {
 	// Update food/drink values on the net status UI panel
 	FoodDrinkMonitor::updateNetStatusUI();
+
+	// Pick up the client's own guild room id (set by the server's guild-room
+	// auto-join at login) before the bridge tick below, so Stage 2 injection
+	// works from login without a typed line and this frame's drain already
+	// sees a fresh id.
+	CuiChatParser::pollClientGuildRoomId();
 
 	// Drives the Discord bridge's frame counter (used to collapse the duplicate
 	// appendText calls one message produces when several tabs show guild chat)
