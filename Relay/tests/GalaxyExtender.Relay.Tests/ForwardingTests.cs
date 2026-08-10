@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
+using GalaxyExtender.Relay.Services;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace GalaxyExtender.Relay.Tests;
 
@@ -124,19 +126,66 @@ public sealed class ForwardingTests
         var body = Assert.Single(app.Discord.RequestBodies);
         using var document = JsonDocument.Parse(body);
 
-        // The hard guarantee: even unsanitised text could not ping anyone.
+        // The hard guarantee, and load-bearing now that chat posts as `content` rather than an
+        // embed: an embed cannot ping whatever it contains, a plain message can.
         var mentions = document.RootElement.GetProperty("allowed_mentions").GetProperty("parse");
         Assert.Equal(0, mentions.GetArrayLength());
 
-        var description = document.RootElement.GetProperty("embeds")[0]
-            .GetProperty("description").GetString()!;
+        var content = document.RootElement.GetProperty("content").GetString()!;
 
         // Ordinal on purpose: culture-aware comparison treats the zero-width joiner as
         // ignorable and would "find" @everyone even though the ping is neutralised.
-        Assert.DoesNotContain("@everyone", description, StringComparison.Ordinal);
-        Assert.Contains("@\u200Deveryone", description, StringComparison.Ordinal);
-        Assert.Contains("\\`this\\`", description);
-        Assert.Contains("\\*out\\*", description);
+        Assert.DoesNotContain("@everyone", content, StringComparison.Ordinal);
+        Assert.Contains("@\u200Deveryone", content, StringComparison.Ordinal);
+        Assert.Contains("\\`this\\`", content);
+        Assert.Contains("\\*out\\*", content);
+    }
+
+    /// <summary>
+    /// Guild chat posts unboxed. The embed is reserved for the world boss alert feed, so its
+    /// absence here is the thing that makes a boxed alert stand out against ordinary chat.
+    /// </summary>
+    [Fact]
+    public async Task Guild_chat_posts_as_a_plain_message_with_no_embed()
+    {
+        using var app = new RelayTestApp();
+        var client = app.CreateAuthenticatedClient();
+
+        await client.PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[GuildChat] carnor: yo bud")));
+
+        var body = Assert.Single(app.Discord.RequestBodies);
+        using var document = JsonDocument.Parse(body);
+
+        Assert.False(document.RootElement.TryGetProperty("embeds", out _));
+
+        // Brackets are NOT escaped on this path: the game supplies the "[GuildChat] " prefix, and
+        // a plain message renders brackets literally, so escaping would publish visible backslashes.
+        Assert.Equal("[GuildChat] carnor: yo bud",
+            document.RootElement.GetProperty("content").GetString());
+    }
+
+    /// <summary>
+    /// The embed builder has no caller since chat moved to plain messages — it is there for the
+    /// world boss alert feed and as the one-line rollback for this change. Unused and untested is
+    /// how it would quietly rot, so pin its shape here.
+    /// </summary>
+    [Fact]
+    public void Embed_payload_still_builds_with_the_requested_colour()
+    {
+        using var app = new RelayTestApp();
+        var publisher = app.Services.GetRequiredService<DiscordPublisher>();
+
+        var payload = publisher.BuildEmbedPayload("boss is up", 0xE74C3C, contributingClientId: null);
+
+        using var document = JsonDocument.Parse(payload);
+        var embed = document.RootElement.GetProperty("embeds")[0];
+
+        Assert.Equal("boss is up", embed.GetProperty("description").GetString());
+        Assert.Equal(0xE74C3C, embed.GetProperty("color").GetInt32());
+        Assert.False(document.RootElement.TryGetProperty("content", out _));
+        Assert.Equal(0, document.RootElement.GetProperty("allowed_mentions")
+            .GetProperty("parse").GetArrayLength());
     }
 
     [Fact]

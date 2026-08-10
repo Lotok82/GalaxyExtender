@@ -113,7 +113,7 @@ Request ──► auth ──► rate limit ──► ChatEndpoint
           (file + named mutex)   strip escapes,      HttpClientFactory,
           dedupe / batchIds /    neutralise pings,   429 aware
           cursor / outbox        escape markdown,           │
-                                 split at 4096             ▼
+                                 split at 2000             ▼
                                                        Outbox (durable)
                                                     drained opportunistically
                                                     at the start of every request
@@ -141,7 +141,10 @@ Order matters, and every step is a test case:
 1. Strip SWG escapes — `\#` + (6 hex | `.`), `\>` + 3 digits (patterns confirmed in the research doc).
 2. Neutralise mentions — belt and braces: send `"allowed_mentions": { "parse": [] }` on every webhook POST **and** rewrite `@everyone` / `@here` to use a zero-width joiner. Guild chat is player-authored text; nobody gets to mass-ping Discord through it.
 3. Escape Discord markdown (`` ` ``, `*`, `_`, `~`, `|`, `>` at line start) so `_underscored_` names render literally.
-4. Clamp per line (default 512 chars) and split the joined description at 4096, emitting additional embeds/posts as needed.
+4. Clamp per line (default 512 chars) and split the joined text at the destination's ceiling — 2000 for a
+   plain message, 4096 for an embed description — emitting additional posts as needed. Guild chat posts as a
+   plain message; the world boss alert feed uses the embed. Bracket escaping differs between the two: see
+   [world-boss-alert-plan.md](world-boss-alert-plan.md).
 
 ### DiscordPublisher
 
@@ -187,7 +190,7 @@ Minimal dependency set: framework only, plus `Serilog.AspNetCore` + `Serilog.Sin
 | 0 | Scaffold + **deploy spike** | ✅ **Done.** Solution, project, `web.config`, `/health` + `/health/outbound`, Serilog to `App_Data/logs`, 7 tests. Live on the host over HTTPS. Two defects found and fixed by doing this first: logging failure could kill startup (Serilog opens the file at `CreateLogger()`, outside the guard), and `StartedUtc` initialised lazily on first request so uptime was meaningless. | 1–2 h |
 | 1 | Contract + auth | ✅ **Done.** DTOs, `ApiKeyValidator` (match-any, SHA-256 digests, non-short-circuiting), path-prefix auth middleware that fails closed, per-key fixed-window rate limiter, full contract validation, `POST /api/v1/chat` returning counts with `X-Relay-Forwarding: disabled`. 32 tests. | 1–2 h |
 | 2 | State + dedupe | ✅ **Done.** `FileStateStore` (in-process lock per the single-worker finding, atomic replace, pruning, corrupt-file recovery); `DedupeService` with `occurrence` keys and `batchId` idempotency. State survives a simulated recycle in tests. | 2–3 h |
-| 3 | Sanitize + publish | ✅ **Done.** `TextSanitizer` (normalise-for-hash vs display-for-Discord kept strictly separate), `DiscordPublisher`, embed split at 4096, `allowed_mentions: {parse: []}` + zero-width-joiner rewrite. Unconfigured webhook → `503` before any state mutation. | 2 h |
+| 3 | Sanitize + publish | ✅ **Done.** `TextSanitizer` (normalise-for-hash vs display-for-Discord kept strictly separate), `DiscordPublisher`, split at the destination ceiling (2000 plain / 4096 embed), `allowed_mentions: {parse: []}` + zero-width-joiner rewrite. Unconfigured webhook → `503` before any state mutation. | 2 h |
 | 4 | Outbox + 429 | ✅ **Done.** Durable outbox in the state file, opportunistic drain (chat POST + heartbeat, ≤5 entries/request, stop on first failure), one bounded ≤2 s in-request retry on 429, exponential backoff capped 300 s, drop after `OutboxMaxAttempts` with an error log. `POST /api/v1/heartbeat` returns outbox depth. | 1–2 h |
 | 5 | Tests | ✅ **Done.** 65 total. `FakeDiscordHandler` records payloads and scripts 429s; covers the named cases below plus sanitizer and state-store units. | 2–3 h |
 | 6 | Harden deploy | Prove survival across an app-pool recycle and across a redeploy (state file must not be wiped); confirm outbound HTTPS to discord.com; turn off `stdoutLogEnabled`. | 1–2 h |

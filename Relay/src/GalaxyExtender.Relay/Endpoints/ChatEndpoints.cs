@@ -99,7 +99,8 @@ public static class ChatEndpoints
 
                     prepared.Add((
                         DedupeService.Key(normalized, line.Occurrence!.Value),
-                        TextSanitizer.ForDiscord(normalized, relayOptions.CurrentValue.MaxLineLength)));
+                        TextSanitizer.ForDiscord(
+                            normalized, relayOptions.CurrentValue.MaxLineLength, DiscordTarget.PlainMessage)));
                 }
 
                 var admission = dedupe.Admit(batchId, clientId, prepared);
@@ -119,7 +120,8 @@ public static class ChatEndpoints
 
                 if (admission.UniqueLines.Count > 0)
                 {
-                    var chunks = TextSanitizer.BuildDescriptions(admission.UniqueLines);
+                    var chunks = TextSanitizer.BuildChunks(
+                        admission.UniqueLines, TextSanitizer.MaxContentLength);
                     var failed = false;
 
                     foreach (var (text, lineCount) in chunks)
