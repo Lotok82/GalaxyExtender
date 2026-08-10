@@ -288,6 +288,12 @@ night means the pool idle-stopped and killed the ticker** — turn on `SelfPingU
 pool's idle timeout to 0 if the control panel allows it. Ticks climbing steadily through the small
 hours means shared hosting is tolerating it and nothing more is needed.
 
+**Measured on this host 2026-08-10, and the answer is that it survives: `ticks` 802 against
+`uptimeSeconds` 48216 — 803 expected at the 60 s interval, so no gaps across 13.4 hours including
+overnight — with `lastError: null` and `selfPing: false`.** The pool is not idle-stopping the
+worker, and `SelfPingUrl` is **not needed here**. Keep the check in mind if the hosting plan or app
+pool configuration ever changes, but do not configure the keep-alive on spec.
+
 `lastError` and `selfPingError` mean opposite things and are kept apart on purpose: the first says
 the relay's own work is failing, the second says the keep-alive is failing and the ticker may be
 about to be idle-stopped out of existence. After setting `SelfPingUrl`, check `selfPingError` is
