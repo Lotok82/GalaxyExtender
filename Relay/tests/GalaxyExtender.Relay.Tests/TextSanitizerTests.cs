@@ -24,20 +24,25 @@ public sealed class TextSanitizerTests
         Assert.Equal("a  b", TextSanitizer.Normalize(" a\u0001\u0009b\u007F "));
     }
 
-    [Fact]
-    public void ForDiscord_neutralises_mass_mentions()
+    [Theory]
+    [InlineData(DiscordTarget.Embed)]
+    [InlineData(DiscordTarget.PlainMessage)]
+    public void ForDiscord_neutralises_mass_mentions(DiscordTarget target)
     {
-        var result = TextSanitizer.ForDiscord("hey @everyone and @HERE", 512);
+        var result = TextSanitizer.ForDiscord("hey @everyone and @HERE", 512, target);
 
         Assert.DoesNotContain("@everyone", result, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("@here", result, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("@\u200Deveryone", result);
     }
 
-    [Fact]
-    public void ForDiscord_escapes_markdown()
+    [Theory]
+    [InlineData(DiscordTarget.Embed)]
+    [InlineData(DiscordTarget.PlainMessage)]
+    public void ForDiscord_escapes_markdown(DiscordTarget target)
     {
-        var result = TextSanitizer.ForDiscord("`code` *bold* _under_ ~strike~ |spoil| back\\slash", 512);
+        var result = TextSanitizer.ForDiscord(
+            "`code` *bold* _under_ ~strike~ |spoil| back\\slash", 512, target);
 
         Assert.Equal(@"\`code\` \*bold\* \_under\_ \~strike\~ \|spoil\| back\\slash", result);
     }
@@ -48,39 +53,60 @@ public sealed class TextSanitizerTests
     /// authored by the relay.
     /// </summary>
     [Fact]
-    public void ForDiscord_escapes_masked_link_syntax()
+    public void ForDiscord_escapes_masked_link_syntax_for_an_embed()
     {
-        var result = TextSanitizer.ForDiscord("[Guild bank payout](https://phishing.example/steal)", 512);
+        var result = TextSanitizer.ForDiscord(
+            "[Guild bank payout](https://phishing.example/steal)", 512, DiscordTarget.Embed);
 
         Assert.Equal(@"\[Guild bank payout\](https://phishing.example/steal)", result);
     }
 
+    /// <summary>
+    /// The other half of that rule. A plain message renders brackets literally, so escaping them
+    /// buys no safety and costs legibility: guild lines arrive from the game already carrying a
+    /// "[GuildChat] " prefix, which would otherwise publish as "\[GuildChat\] ".
+    /// </summary>
     [Fact]
-    public void ForDiscord_escapes_blockquote_only_at_line_start()
+    public void ForDiscord_leaves_brackets_alone_in_a_plain_message()
     {
-        Assert.Equal(@"\> quoted a > b", TextSanitizer.ForDiscord("> quoted a > b", 512));
+        var result = TextSanitizer.ForDiscord(
+            "[GuildChat] carnor: yo bud", 512, DiscordTarget.PlainMessage);
+
+        Assert.Equal("[GuildChat] carnor: yo bud", result);
     }
 
-    [Fact]
-    public void ForDiscord_clamps_and_never_ends_on_a_lone_backslash()
+    [Theory]
+    [InlineData(DiscordTarget.Embed)]
+    [InlineData(DiscordTarget.PlainMessage)]
+    public void ForDiscord_escapes_blockquote_only_at_line_start(DiscordTarget target)
     {
-        var result = TextSanitizer.ForDiscord(new string('*', 300), 512);
+        Assert.Equal(@"\> quoted a > b", TextSanitizer.ForDiscord("> quoted a > b", 512, target));
+    }
+
+    [Theory]
+    [InlineData(DiscordTarget.Embed)]
+    [InlineData(DiscordTarget.PlainMessage)]
+    public void ForDiscord_clamps_and_never_ends_on_a_lone_backslash(DiscordTarget target)
+    {
+        var result = TextSanitizer.ForDiscord(new string('*', 300), 512, target);
 
         Assert.True(result.Length <= 512);
         Assert.False(result.EndsWith('\\') && !result.EndsWith(@"\\") && !result.EndsWith(@"\*"),
             "clamped text must not end with a dangling escape backslash");
     }
 
-    /// <summary>The plan's named case: a 5000-char payload survives, split across embeds.</summary>
-    [Fact]
-    public void BuildDescriptions_splits_at_the_embed_limit_without_splitting_lines()
+    /// <summary>The plan's named case: a 5000-char payload survives, split across messages.</summary>
+    [Theory]
+    [InlineData(TextSanitizer.MaxDescriptionLength)]
+    [InlineData(TextSanitizer.MaxContentLength)]
+    public void BuildChunks_splits_at_the_limit_without_splitting_lines(int limit)
     {
         var lines = Enumerable.Range(0, 12).Select(i => new string((char)('a' + i), 500)).ToList();
 
-        var chunks = TextSanitizer.BuildDescriptions(lines);
+        var chunks = TextSanitizer.BuildChunks(lines, limit);
 
         Assert.True(chunks.Count >= 2);
-        Assert.All(chunks, chunk => Assert.True(chunk.Text.Length <= TextSanitizer.MaxDescriptionLength));
+        Assert.All(chunks, chunk => Assert.True(chunk.Text.Length <= limit));
         Assert.Equal(lines.Count, chunks.Sum(chunk => chunk.LineCount));
 
         // No line was cut: every chunk is whole lines joined by newlines.
@@ -88,10 +114,27 @@ public sealed class TextSanitizerTests
             Assert.All(chunk.Text.Split('\n'), line => Assert.Equal(500, line.Length)));
     }
 
+    /// <summary>
+    /// The tighter plain-message ceiling has to actually bite — the same batch that fits one embed
+    /// description must split into more than one message.
+    /// </summary>
     [Fact]
-    public void BuildDescriptions_keeps_a_short_batch_in_one_chunk()
+    public void BuildChunks_splits_more_finely_for_a_plain_message_than_for_an_embed()
     {
-        var chunks = TextSanitizer.BuildDescriptions(["one", "two"]);
+        var lines = Enumerable.Range(0, 6).Select(i => new string((char)('a' + i), 500)).ToList();
+
+        var asEmbed = TextSanitizer.BuildChunks(lines, TextSanitizer.MaxDescriptionLength);
+        var asContent = TextSanitizer.BuildChunks(lines, TextSanitizer.MaxContentLength);
+
+        Assert.Single(asEmbed);
+        Assert.True(asContent.Count > 1);
+        Assert.Equal(lines.Count, asContent.Sum(chunk => chunk.LineCount));
+    }
+
+    [Fact]
+    public void BuildChunks_keeps_a_short_batch_in_one_chunk()
+    {
+        var chunks = TextSanitizer.BuildChunks(["one", "two"], TextSanitizer.MaxContentLength);
 
         var chunk = Assert.Single(chunks);
         Assert.Equal("one\ntwo", chunk.Text);

@@ -424,9 +424,16 @@ key is `sha256(normalised text)[..16] + ":" + occurrence`; the window is `Dedupe
 and a client retrying a timed-out POST with the **same `batchId`** is answered from a 5-minute
 idempotency window without posting anything twice.
 
-What reaches Discord: one green embed per batch (split above 4096 characters), with SWG escapes
-stripped, Discord markdown escaped, `@everyone`/`@here` neutralised with a zero-width joiner, and
-`allowed_mentions: {"parse": []}` on every POST — player-authored text can never ping anyone.
+What reaches Discord: one **plain message** per batch — no embed, no quote box (split above 2000
+characters, Discord's `content` ceiling). Guild lines already arrive carrying the game's own
+`[GuildChat] ` prefix, so nothing is added. Chat used to post as a green embed; it moved to plain text
+so that a *boxed* message means something — the world boss alert feed keeps the embed and colours its
+bar. Two consequences worth knowing: `allowed_mentions: {"parse": []}` is now the actual ping
+guarantee rather than a second layer (an embed cannot ping whatever it holds; `content` can), and
+`[`/`]` are deliberately left unescaped on this path because plain messages render brackets literally
+— escaping them only published visible backslashes. The embed path still escapes them, and must.
+Everything else is unchanged: SWG escapes
+stripped, Discord markdown escaped, and `@everyone`/`@here` neutralised with a zero-width joiner.
 
 Status codes: `400` contract violation (RFC 7807 body naming the offending field, e.g. `lines[1].text`) · `401` missing/bad key · `413` oversize · `429` rate-limited (`Retry-After`) · `503` webhook not configured.
 
