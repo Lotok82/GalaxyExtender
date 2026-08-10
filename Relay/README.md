@@ -7,7 +7,7 @@ this file is the operational reference and the wire contract the C++ side codes 
 - **Target:** `net8.0`, ASP.NET Core minimal API
 - **Host:** IIS shared hosting (Plesk), in-process (`AspNetCoreModuleV2`), dedicated app pool, 1 worker process
 - **Live at:** `https://example.invalid/relay` — subfolder registered as an IIS application
-- **Status:** **All phases complete — forwarding AND the Stage 2 read path (R3–R7) are implemented.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` serves the pinned Stage 2 claim contract for real when `Discord:BotToken` + `Discord:ChannelId` + `Discord:Stage2Enabled` are configured (on-demand channel fetch, echo filter, sanitizer, claim/redelivery/ack store) and answers empty + `X-Relay-Stage2: disabled` otherwise. Marked lines (`[Discord] …` after the sender prefix) arriving on `/chat` are the Stage 2 delivery ack — matched exact-first-then-mask-tolerant, counted as `accepted`, and **never forwarded to Discord**. `POST /api/v1/presence` records which extension clients are alive, and with `Discord:CommandsEnabled` the bot answers a `status` mention in the channel with how many clients are online (R11 — see [Bot commands and presence](#bot-commands-and-presence-r11)). A [background ticker](#background-ticker-r12) (R12) runs the outbox drain, the cleanup sweep and the command scan on a timer, so all three still happen with nobody in game — the case where the bot most needs to answer. 237 tests. Remaining: Phase 6 (post-deploy hardening checks).
+- **Status:** **All phases complete — forwarding AND the Stage 2 read path (R3–R7) are implemented.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` serves the pinned Stage 2 claim contract for real when `Discord:BotToken` + `Discord:ChannelId` + `Discord:Stage2Enabled` are configured (on-demand channel fetch, echo filter, sanitizer, claim/redelivery/ack store) and answers empty + `X-Relay-Stage2: disabled` otherwise. Marked lines (`[Discord] …` after the sender prefix) arriving on `/chat` are the Stage 2 delivery ack — matched exact-first-then-mask-tolerant, counted as `accepted`, and **never forwarded to Discord**. `POST /api/v1/presence` records which extension clients are alive, and with `Discord:CommandsEnabled` the bot answers a `status` mention in the channel with how many clients are online (R11 — see [Bot commands and presence](#bot-commands-and-presence-r11)). A [background ticker](#background-ticker-r12) (R12) runs the outbox drain, the cleanup sweep and the command scan on a timer, so all three still happen with nobody in game — the case where the bot most needs to answer; measured surviving shared IIS without the self-ping. Guild chat now posts as a **plain message** rather than an embed, and with `Discord:AlertsEnabled` a line beginning with a configured tag posts as a coloured embed instead — see [World boss alerts](#world-boss-alerts). 259 tests. Remaining: Phase 6 (post-deploy hardening checks).
 
 Verified on the host 2026-08-05: .NET 8.0.29 / Windows Server 2019, outbound to discord.com reachable (200 in 194 ms), `App_Data` writable, `process.id` stable across 4 minutes, `isHttps` reported correctly so `RequireHttps` is enabled.
 
@@ -28,6 +28,7 @@ Relay/
     Services/FileStateStore.cs       durable state (dedupe/batches/outbox), atomic writes
     Services/DedupeService.cs        occurrence-aware dedupe + batchId idempotency
     Services/TextSanitizer.cs        normalise for hashing; escape/neutralise for Discord
+    Services/AlertRules.cs           which lines are world boss alerts, and their colour
     Services/DiscordPublisher.cs     webhook POSTs, allowed_mentions lockdown, 429-aware
     Services/Outbox.cs               parked payloads, opportunistic drain, backoff
     Services/DiscordReader.cs        Stage 2 channel read, echo + command filter
@@ -74,7 +75,9 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Relay:OutboxMaxEntries` | `200` | Undelivered payloads kept at most; oldest dropped beyond it. |
 | `Relay:OutboxMaxAttempts` | `10` | Delivery attempts before an outbox entry is dropped (error-logged). |
 | `Discord:WebhookUrl` | — | Live credential. Must be an absolute `https://` URL or the relay reports unconfigured and answers `503`. |
-| `Discord:EmbedColor` | `3066993` | `0x2ECC71` green. |
+| `Discord:EmbedColor` | `3066993` | `0x2ECC71` green. **No longer read by guild chat**, which posts as a plain message — kept as what a revert of that change would use again. |
+| `Discord:AlertsEnabled` | `false` | Operator switch for the [world boss alert feed](#world-boss-alerts) below. Off by default like the switches above. |
+| `Discord:AlertTags` | *(the two World Boss tags)* | Tag → embed colour. Setting **any** tag replaces the built-in set rather than merging with it, so a tag can be retired and not only added. Matched case-insensitively. |
 | `Discord:ShowContributingClient` | `false` | Debug embed field naming the client that won the dedupe race. |
 | `Discord:BotToken` | — | Live credential for the Stage 2 read path. Raw token, no `Bot ` prefix. |
 | `Discord:ChannelId` | — | Bridge channel snowflake, as a string of digits. |
@@ -101,6 +104,35 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Relay:PresenceMaxClients` | `200` | Hard cap on the presence roster. |
 | `Relay:BackgroundTickSeconds` | `60` | Interval for the background ticker below. `0` disables it and everything reverts to running on request traffic only. Clamped to 1 s–1 h. |
 | `Relay:SelfPingUrl` | — | Optional absolute `http(s)` URL the ticker GETs once per tick, to stop IIS idle-stopping the pool. Point it at this relay's own `/api/v1/health`. Off by default — see below for how to tell whether you need it, and check `backgroundTicker.selfPingError` on `/health` once set. |
+
+### World boss alerts
+
+With `Discord:AlertsEnabled` true, a chat line whose text **begins with** a configured tag publishes
+as a coloured embed instead of as ordinary chat. Out of the box `[PvE World Boss]` is green and
+`[PvP World Boss]` is red. Nothing else about the pipeline changes: alerts arrive on `/chat` like any
+other line, dedupe across clients the same way (every in-world client sees the same broadcast and
+sends its own copy), and go out through the same webhook to the same channel.
+
+The point of the split is contrast. Guild chat is unboxed, so a box means "this is not someone
+talking".
+
+Three rules worth knowing before changing any of this:
+
+- **Matching is anchored at the START of the line, and that is a security control, not a style
+  choice.** A server broadcast reaches the relay with no sender prefix; anything a player types
+  arrives as `Kaelen: [PvP World Boss] ...` and therefore cannot match. Relaxing this to "contains"
+  would let any player publish a red alert.
+- **Matching is case-insensitive**, because the casing the server actually broadcasts is unverified
+  until the first live alert and a mismatch would silently drop every alert while looking like the
+  feature merely not working.
+- **A tag the relay does not recognise publishes as ordinary chat.** Unstyled is the intended
+  degradation when a client's tag list runs ahead of this config; dropped would not be.
+
+Alerts take the embed path through the sanitizer, which means they keep the `[`/`]` escaping that
+plain chat drops — an embed description renders `[text](url)` as a masked hyperlink. The tag itself
+therefore travels as `\[PvE World Boss\]` and Discord renders the brackets back. Do not "fix" that.
+
+`/health` reports `config.alertsConfigured`.
 
 ### Channel-history cleanup (R10)
 
@@ -290,6 +322,12 @@ night means the pool idle-stopped and killed the ticker** — turn on `SelfPingU
 pool's idle timeout to 0 if the control panel allows it. Ticks climbing steadily through the small
 hours means shared hosting is tolerating it and nothing more is needed.
 
+**Measured on this host 2026-08-10, and the answer is that it survives: `ticks` 802 against
+`uptimeSeconds` 48216 — 803 expected at the 60 s interval, so no gaps across 13.4 hours including
+overnight — with `lastError: null` and `selfPing: false`.** The pool is not idle-stopping the
+worker, and `SelfPingUrl` is **not needed here**. Keep the check in mind if the hosting plan or app
+pool configuration ever changes, but do not configure the keep-alive on spec.
+
 `lastError` and `selfPingError` mean opposite things and are kept apart on purpose: the first says
 the relay's own work is failing, the second says the keep-alive is failing and the ticker may be
 about to be idle-stopped out of existence. After setting `SelfPingUrl`, check `selfPingError` is
@@ -426,9 +464,19 @@ key is `sha256(normalised text)[..16] + ":" + occurrence`; the window is `Dedupe
 and a client retrying a timed-out POST with the **same `batchId`** is answered from a 5-minute
 idempotency window without posting anything twice.
 
-What reaches Discord: one green embed per batch (split above 4096 characters), with SWG escapes
-stripped, Discord markdown escaped, `@everyone`/`@here` neutralised with a zero-width joiner, and
-`allowed_mentions: {"parse": []}` on every POST — player-authored text can never ping anyone.
+What reaches Discord: one **plain message** per batch — no embed, no quote box (split above 2000
+characters, Discord's `content` ceiling). Guild lines already arrive carrying the game's own
+`[GuildChat] ` prefix, so nothing is added. Chat used to post as a green embed; it moved to plain text
+so that a *boxed* message means something — the world boss alert feed keeps the embed and colours its
+bar. Two consequences worth knowing: `allowed_mentions: {"parse": []}` is now the actual ping
+guarantee rather than a second layer (an embed cannot ping whatever it holds; `content` can), and
+`[`/`]` are deliberately left unescaped on this path so the `[GuildChat]` prefix reads cleanly —
+an **accepted risk**, not a free lunch: webhook-authored `content` *does* render `[text](url)` as a
+masked link (only human-typed messages show the brackets literally), so a player can post a
+disguised link into this private, trusted channel. Revisit before pointing the relay at a public
+one. The embed path still escapes brackets, and must.
+Everything else is unchanged: SWG escapes
+stripped, Discord markdown escaped, and `@everyone`/`@here` neutralised with a zero-width joiner.
 
 Status codes: `400` contract violation (RFC 7807 body naming the offending field, e.g. `lines[1].text`) · `401` missing/bad key · `413` oversize · `429` rate-limited (`Retry-After`) · `503` webhook not configured.
 

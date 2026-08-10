@@ -26,20 +26,69 @@ public sealed class DiscordPublisher(
     /// <summary>Longest retry_after honoured inside the request; anything above goes to the outbox.</summary>
     private static readonly TimeSpan MaxInRequestRetry = TimeSpan.FromSeconds(2);
 
+    /// <summary>Subtext prefix for the contributing-client label on a plain message.</summary>
+    private const string ClientSuffixPrefix = "\n-# client: ";
+
+    /// <summary>Clamp for the client label — the id is self-reported and unauthenticated.</summary>
+    private const int MaxClientLabelLength = 64;
+
+    /// <summary>
+    /// Headroom the chunker must reserve below <see cref="TextSanitizer.MaxContentLength"/> for
+    /// the subtext <see cref="BuildPayload"/> appends; zero while the flag is off. Without the
+    /// reserve, a chunk built right up to 2000 goes over once the suffix lands, Discord rejects
+    /// the POST with a 400 on every retry, and the outbox eventually drops the lines.
+    /// </summary>
+    public int PlainContentReserve =>
+        options.CurrentValue.ShowContributingClient
+            ? ClientSuffixPrefix.Length + MaxClientLabelLength
+            : 0;
+
     public sealed record PublishResult(bool Success, TimeSpan? RetryAfter)
     {
         public static readonly PublishResult Ok = new(true, null);
     }
 
-    /// <summary>Builds the webhook payload for one embed description.</summary>
-    public string BuildPayload(string description, string? contributingClientId)
+    /// <summary>
+    /// Builds the webhook payload for guild chat: a PLAIN message, no embed.
+    ///
+    /// Chat used to be posted as a green embed. It reads better unboxed, and against plain chat a
+    /// boxed alert becomes the thing that stands out (see the world boss alert plan). One
+    /// consequence is worth keeping in mind when editing this: an embed can never ping anyone
+    /// whatever it contains, whereas <c>content</c> can — so the <c>allowed_mentions</c> lockdown
+    /// on <see cref="WebhookPayload"/> stopped being belt-and-braces and became the guarantee.
+    /// </summary>
+    public string BuildPayload(string content, string? contributingClientId)
+    {
+        var current = options.CurrentValue;
+
+        // An embed carries this as a field; a plain message has nowhere structural to put it, so
+        // it goes in the body as subtext. Escaped like any other untrusted text — the id is
+        // self-reported by the client and is not authenticated.
+        if (current.ShowContributingClient && !string.IsNullOrEmpty(contributingClientId))
+        {
+            var label = TextSanitizer.ForDiscord(
+                TextSanitizer.Normalize(contributingClientId), MaxClientLabelLength,
+                DiscordTarget.PlainMessage);
+
+            content = $"{content}{ClientSuffixPrefix}{label}";
+        }
+
+        return JsonSerializer.Serialize(new WebhookPayload { Content = content });
+    }
+
+    /// <summary>
+    /// Builds an embed payload. Not used by guild chat since it moved to plain messages — this is
+    /// the shape the world boss alert feed needs (its whole point is a coloured box against
+    /// unboxed chat), and it keeps reverting the chat change a one-line swap at the call site.
+    /// </summary>
+    public string BuildEmbedPayload(string description, int color, string? contributingClientId)
     {
         var current = options.CurrentValue;
 
         var embed = new Embed
         {
             Description = description,
-            Color = current.EmbedColor,
+            Color = color,
             Fields = current.ShowContributingClient && !string.IsNullOrEmpty(contributingClientId)
                 ? [new EmbedField { Name = "client", Value = contributingClientId }]
                 : null
@@ -146,8 +195,13 @@ public sealed class DiscordPublisher(
 
     private sealed class WebhookPayload
     {
+        [JsonPropertyName("content")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? Content { get; init; }
+
         [JsonPropertyName("embeds")]
-        public required Embed[] Embeds { get; init; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public Embed[]? Embeds { get; init; }
 
         // Even with the sanitizer's rewrite, this is the hard guarantee that nothing in
         // player-authored text can ping anyone.
