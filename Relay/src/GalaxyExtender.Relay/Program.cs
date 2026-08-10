@@ -79,6 +79,7 @@ builder.Services.AddSingleton<ApiKeyValidator>();
 // Forwarding pipeline (Phases 2-4): durable state, dedupe, sanitize, publish, outbox.
 builder.Services.AddSingleton<IStateStore, FileStateStore>();
 builder.Services.AddSingleton<DedupeService>();
+builder.Services.AddSingleton<AlertRules>();
 builder.Services.AddSingleton<DiscordPublisher>();
 builder.Services.AddSingleton<Outbox>();
 

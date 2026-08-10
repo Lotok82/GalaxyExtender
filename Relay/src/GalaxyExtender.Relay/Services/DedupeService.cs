@@ -16,14 +16,22 @@ namespace GalaxyExtender.Relay.Services;
 /// </summary>
 public sealed class DedupeService(IStateStore store, IOptionsMonitor<RelayOptions> options)
 {
+    /// <summary>
+    /// One line ready to publish. <paramref name="Alert"/> is null for ordinary chat and set for a
+    /// world boss alert; it rides through admission because the render decision is made BEFORE
+    /// dedupe (it selects the escaping) and is needed again AFTER it (it selects the payload shape),
+    /// and the display text alone cannot be classified once escaped.
+    /// </summary>
+    public sealed record PreparedLine(string Key, string DisplayText, AlertRule? Alert);
+
     /// <summary>Outcome of admitting a batch. Exactly one of the two shapes:</summary>
     /// <param name="ReplayedResponse">Set when this batchId was already processed — the caller
     /// returns it verbatim and must NOT post anything.</param>
-    /// <param name="UniqueLines">Display-form lines seen for the first time, in arrival order.</param>
+    /// <param name="UniqueLines">Lines seen for the first time, in arrival order.</param>
     /// <param name="Deduped">Lines recognised as duplicates of an earlier arrival.</param>
     public sealed record Admission(
         ChatBatchResponse? ReplayedResponse,
-        IReadOnlyList<string> UniqueLines,
+        IReadOnlyList<PreparedLine> UniqueLines,
         int Deduped);
 
     public static string Key(string normalizedText, int occurrence)
@@ -47,7 +55,7 @@ public sealed class DedupeService(IStateStore store, IOptionsMonitor<RelayOption
     public Admission Admit(
         string batchId,
         string? clientId,
-        IReadOnlyList<(string Key, string DisplayText)> lines)
+        IReadOnlyList<PreparedLine> lines)
     {
         var current = options.CurrentValue;
         var now = DateTimeOffset.UtcNow;
@@ -64,23 +72,23 @@ public sealed class DedupeService(IStateStore store, IOptionsMonitor<RelayOption
                 return new Admission(known.Response, [], 0);
             }
 
-            var unique = new List<string>();
+            var unique = new List<PreparedLine>();
             var deduped = 0;
             var seenThisBatch = new HashSet<string>(StringComparer.Ordinal);
 
-            foreach (var (key, displayText) in lines)
+            foreach (var line in lines)
             {
                 // Within one batch the extension never sends the same (text, occurrence) twice,
                 // but the contract does not forbid it — treat an in-batch repeat as a duplicate.
-                if (!seenThisBatch.Add(key) ||
-                    state.Dedupe.Any(entry => string.Equals(entry.Key, key, StringComparison.Ordinal)))
+                if (!seenThisBatch.Add(line.Key) ||
+                    state.Dedupe.Any(entry => string.Equals(entry.Key, line.Key, StringComparison.Ordinal)))
                 {
                     deduped++;
                     continue;
                 }
 
-                state.Dedupe.Add(new DedupeEntry { Key = key, FirstSeenUtc = now, FirstSeenBy = clientId });
-                unique.Add(displayText);
+                state.Dedupe.Add(new DedupeEntry { Key = line.Key, FirstSeenUtc = now, FirstSeenBy = clientId });
+                unique.Add(line);
             }
 
             return new Admission(null, unique, deduped);

@@ -1,6 +1,12 @@
 # World Boss Alerts → Discord — Investigation Plan
 
-Status: **INVESTIGATION COMPLETE, NOTHING BUILT (2026-08-10).** Feasibility confirmed from source on both
+Status: **RELAY SIDE BUILT (steps 1–2, 2026-08-10, 259 tests) — NOT DEPLOYED. Extension side not
+started.** Step 1 (guild chat as plain text) and step 2 (the alert feed behind a default-off
+`Discord:AlertsEnabled`) are on branch `worldbossalert`. What remains is step 3, the DLL change that
+actually sends these lines, then deploy and an in-game check. Original investigation below, kept
+because the rejected alternatives and the anti-spoof reasoning still govern the code.
+
+Status when written: **INVESTIGATION COMPLETE, NOTHING BUILT (2026-08-10).** Feasibility confirmed from source on both
 sides: the alert lines already reach the existing capture hook and the entire downstream pipeline is
 channel-agnostic, so the capture half is small and contained. Decisions taken by the user: alerts go to
 **the same Discord channel as guild chat** (same webhook — no second webhook); **no other broadcast types**
