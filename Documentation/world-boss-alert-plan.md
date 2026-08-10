@@ -1,10 +1,20 @@
 # World Boss Alerts → Discord — Investigation Plan
 
-Status: **RELAY SIDE BUILT (steps 1–2, 2026-08-10, 259 tests) — NOT DEPLOYED. Extension side not
-started.** Step 1 (guild chat as plain text) and step 2 (the alert feed behind a default-off
-`Discord:AlertsEnabled`) are on branch `worldbossalert`. What remains is step 3, the DLL change that
-actually sends these lines, then deploy and an in-game check. Original investigation below, kept
-because the rejected alternatives and the anti-spoof reasoning still govern the code.
+Status: **BUILT END TO END (steps 1–3, 2026-08-10) — NOT DEPLOYED, NOT YET SEEN IN GAME.** On branch
+`worldbossalert`: step 1 guild chat as plain text, step 2 the relay alert feed behind a default-off
+`Discord:AlertsEnabled`, step 3 the extension gate (`alerts` / `alert_channel_types` / `alert_tags`
+ini keys, default `{5, 11}` and the two World Boss tags). 259 relay tests, 91 harness checks, DLL
+clean in Debug and Release x86.
+
+What remains is steps 4–5: deploy the relay, set `"AlertsEnabled": true`, roll the DLL, and confirm at
+the next boss spawn. **The one assumption still unverified in the real game is the channel type** — the
+default `{5, 11}` targets `CT_systemMessage`/`CT_quest` on the strength of source reading plus the
+user's expectation, and if a boss alert arrives elsewhere the fix is one ini line, no rebuild. Also
+unverified: that the broadcast really carries no sender prefix, which is what the start-anchored gate
+depends on.
+
+Original investigation below, kept because the rejected alternatives and the anti-spoof reasoning
+still govern the code.
 
 Status when written: **INVESTIGATION COMPLETE, NOTHING BUILT (2026-08-10).** Feasibility confirmed from source on both
 sides: the alert lines already reach the existing capture hook and the entire downstream pipeline is

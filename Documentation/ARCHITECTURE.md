@@ -438,9 +438,26 @@ Tab::appendText hook (main thread)          DiscordBridge worker (WinHTTP)
 |---------|-------------|
 | `/emu discord on` | Enable relaying; re-reads the ini and clears the 401 latch |
 | `/emu discord off` | Disable relaying, discard the queue |
-| `/emu discord status` | State, relay host, queue depth, last HTTP result, presence counts |
+| `/emu discord status` | State, relay host, queue depth, last HTTP result, presence counts, alert counters |
 | `/emu discord test` | Enqueue a synthetic line (exercises the strip path) |
-| `/emu discord types` | Observed `ChannelId.type` values with sample lines |
+| `/emu discord types` | Observed `ChannelId.type` values with sample lines; marks which are relayed and which are scanned for alert tags |
+
+### World boss alerts
+
+The same `Tab::appendText` capture also scans an allow-list of other channel types
+(`alert_channel_types`, default `5,11` = `CT_systemMessage`/`CT_quest`) for lines that **start with**
+one of `alert_tags` (default `[PvE World Boss]`, `[PvP World Boss]`, matched case-insensitively).
+Only those are relayed; everything else on those channels is personal to the player and never leaves
+the machine.
+
+Start-anchored matching is the anti-spoof control, not formatting: a server broadcast arrives with no
+sender prefix, whereas a player typing the tag arrives as `Kaelen: [PvP World Boss] ...` and cannot
+match. A per-minute cap (10) backstops a mis-set `alert_channel_types` from spending the guild's
+shared relay quota; suppressed lines are counted and shown by `/emu discord status`.
+
+The relay recognises the same tags and renders them as a coloured embed (PvE green, PvP red) while
+ordinary guild chat posts as a plain message. Details and rejected alternatives:
+[world-boss-alert-plan.md](world-boss-alert-plan.md).
 
 ### Presence (R11)
 

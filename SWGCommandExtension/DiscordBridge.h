@@ -24,6 +24,16 @@
 // happens while a claim could actually be honoured: room id cached, frame
 // tick fresh (in the ground scene), and the incoming queue drained.
 //
+// World boss alerts: the same capture hook also scans a small allow-list of
+// other channel types (CT_systemMessage, CT_quest by default) for lines that
+// START with a configured tag — "[PvE World Boss]" / "[PvP World Boss]" — and
+// relays only those. Matching at the start is what stops a player typing a fake
+// alert: a server broadcast has no sender prefix, a player's line always does.
+// Everything else on those channels is personal to the player (mission, loot and
+// error messages) and never leaves the machine. The relay recognises the same
+// tags and renders them as a coloured embed instead of plain chat. See
+// Documentation/world-boss-alert-plan.md.
+//
 // Configuration lives in DiscordBridge.ini beside the DLL (git-ignored — it
 // holds the relay key):
 //
@@ -42,6 +52,15 @@
 //   stage2=1                  ; set to 0 to opt this client out of polling /
 //                             ; injecting Discord messages (Stage 1 relaying
 //                             ; and the display rewrite are unaffected)
+//   alerts=1                  ; set to 0 to opt out of relaying tagged server
+//                             ; broadcasts (world boss alerts)
+//   alert_channel_types=5,11  ; optional, channels scanned for alert tags
+//                             ; (CT_systemMessage, CT_quest). Replaces the
+//                             ; default rather than adding to it.
+//   alert_tags=[PvE World Boss],[PvP World Boss]
+//                             ; optional, comma-separated. A line is an alert
+//                             ; when it STARTS with one of these, matched
+//                             ; case-insensitively. Replaces the default.
 //
 // Threading: everything in the hook path runs on the game's main thread and
 // must never block — clean, enqueue, return. All HTTP happens on the worker
@@ -110,6 +129,18 @@ public:
 	// "[GuildChat] Kaelen: [Discord] Bob: hi" -> "[GuildChat] [Discord] Bob: hi".
 	// Returns false (out untouched) when the line does not match.
 	static bool rewriteMarkedLine(const wchar_t* in, size_t length, std::wstring& out);
+
+	// --- World boss alert gate, exported for the test harness ---
+	// Both read the loaded configuration, so they answer with whatever
+	// alert_tags / alert_channel_types are in force.
+
+	// True when text (already passed through cleanChatText) STARTS with one of
+	// the configured tags, compared case-insensitively. Start-anchored on
+	// purpose — see the note in the .cpp; this is the anti-spoof rule.
+	static bool isAlertLine(const wchar_t* text, size_t length);
+
+	// True when this ChannelId.type is scanned for alert tags.
+	static bool isAlertChannel(int channelType);
 
 	// --- text helpers (exported for reuse/diagnostics) ---
 	// Strips SWG escapes (\#RRGGBB, \#., \>NNN), maps control characters to
