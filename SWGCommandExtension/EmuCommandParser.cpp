@@ -646,7 +646,7 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 			resultUnicode += L"  /emu discord test - queue a synthetic line\n";
 			resultUnicode += L"  /emu discord poll - poll the relay for Discord messages now (Stage 2)\n";
 			resultUnicode += L"  /emu discord types - chat channel types seen so far (guild-channel check)\n";
-			resultUnicode += L"  /emu discord rooms - room ids seen for typed lines (Stage 2 send path)\n";
+			resultUnicode += L"  /emu discord rooms - guild room id from the client + typed-line room log (Stage 2 send path)\n";
 
 			return true;
 		}

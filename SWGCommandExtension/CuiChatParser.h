@@ -27,9 +27,23 @@ public:
 	// into the test harness without soe::unicode's client allocators.
 	static bool injectRoom(const wchar_t* text, size_t length);
 
+	// Reads the client's own guild room id static (CuiChatRoomManager.h) into
+	// the cache. Called once per frame from GroundScene::parseMessages, main
+	// thread. The static is set when the server auto-joins the character into
+	// the guild room at login and zeroed on guild leave, so injection works
+	// from login with no typed line. When it reads non-zero it takes priority
+	// over the typed-line cache below, which stays as the fallback.
+	static void pollClientGuildRoomId();
+
 	// Thread-safe "has a room id been cached this session?" — the bridge's
 	// worker thread reads it to decide whether polling (claiming) is safe.
+	// True when either source (client static, typed line) has an id.
 	static bool hasCachedRoomId();
+
+	// Which source injectRoom would use right now: 0 = none, 1 = the client's
+	// guild-room static, 2 = the typed-line cache. Main thread only — status
+	// text, not a gate.
+	static int cachedRoomIdSource();
 
 	DEFINE_HOOK(COMMAND_HANDLER_ADDRESS, parse, originalParse);
 };

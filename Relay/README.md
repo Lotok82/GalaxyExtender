@@ -213,13 +213,15 @@ matters, because there is no update mechanism for the DLL and players replace it
 | `/messages` poll | every 5 s (60 s while Stage 2 reads are off) | a client in the ground scene with a cached guild room id |
 | `POST /presence` | every 60 s while in the world | everything, including a silent lurker — **new DLLs only** |
 
-The poll gate is the interesting one: a client only polls once the player has typed something in the
-guild tab this session (that is what caches the room id). So on the installed base, "connected"
+The poll gate is the interesting one: a client only polls once it knows the guild room id. Current
+DLLs read that from the client's own guild-room record, filled at login, so they poll from the
+moment the player is in the world; DLLs that predate the static hunt only learn it when the player
+types something in the guild tab that session. Either way, on the installed base "connected"
 really means **"a client that can currently move traffic"** — and that is the honest reading for this
 bot's purpose, because a client that is not polling cannot receive an injection either. What the
-presence ping adds is the player who is in the world but has not typed in the guild tab: counted as
-connected once their client sends it. Until the DLL is widely updated, expect the count to be a
-floor, not a census.
+presence ping adds is the player whose client is not polling — a guildless character, or an older
+DLL before its player has typed in the guild tab: counted as connected once their client sends it.
+Until the DLL is widely updated, expect the count to be a floor, not a census.
 
 What separates one client from another is `client.id`. On an updated DLL that is unique by
 construction — a hash of the machine's Windows `MachineGuid` (hostname as fallback), with any
@@ -545,11 +547,12 @@ that still sends them is fine and the relay stores no player labels.
 
 **This endpoint is an accuracy upgrade, not a prerequisite.** Presence is primarily derived from
 traffic the relay already receives — `/chat` and `/messages` refresh the same stamp — because DLL
-updates are manual and reach the guild slowly. What those two signals cannot see is a player who is
-in the world but has not typed in the guild tab this session: no room id is cached, so their client
-never polls, and a quiet guild looks identical to an empty one. That is the gap this closes, and it
-is a gap in *counting* only — such a client cannot receive an injection either, so the bridge's own
-behaviour does not depend on it.
+updates are manual and reach the guild slowly. What those two signals cannot see is a player whose
+client is not polling: a guildless character, or an older DLL whose player has not typed in the
+guild tab this session (those builds only learn the room id from a typed line; current builds read
+it from the client's own guild-room record at login). Without this ping a quiet guild looks
+identical to an empty one. That is the gap this closes, and it is a gap in *counting* only — such a
+client cannot receive an injection either, so the bridge's own behaviour does not depend on it.
 
 The extension pings it every **60 s** while the bridge is active *and the frame tick is fresh* — the
 tick only runs in the ground scene, so a client parked on the login screen is not reported as logged
