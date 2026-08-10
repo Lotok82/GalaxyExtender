@@ -12,11 +12,15 @@ namespace GalaxyExtender.Relay.Services;
 ///
 /// <see cref="ForDiscord"/> takes a normalised line to the DISPLAY form — mass-mentions
 /// neutralised, Discord markdown escaped, clamped. Presentation only; never feed it to the hash.
+/// It needs to know which kind of message the text is bound for: see <see cref="DiscordTarget"/>.
 /// </summary>
 public static class TextSanitizer
 {
     /// <summary>Discord's hard limit on an embed description.</summary>
     public const int MaxDescriptionLength = 4096;
+
+    /// <summary>Discord's hard limit on a plain message's <c>content</c> — far below an embed's.</summary>
+    public const int MaxContentLength = 2000;
 
     /// <summary>
     /// Mirrors the extension's cleanChatText: strip <c>\#RRGGBB</c>, <c>\#.</c> and <c>\>NNN</c>,
@@ -72,8 +76,13 @@ public static class TextSanitizer
     ///    payload also carries <c>allowed_mentions: {parse: []}</c> (braces);
     /// 2. escape Discord markdown so player text renders literally;
     /// 3. clamp to <paramref name="maxLength"/> characters.
+    ///
+    /// <paramref name="target"/> is not a style preference — it decides whether bracket escaping
+    /// happens, and the two destinations made different safety/legibility trade-offs (see
+    /// <see cref="DiscordTarget"/>). There is no default: a call site that has not thought about
+    /// it is exactly the one that gets it wrong.
     /// </summary>
-    public static string ForDiscord(string normalized, int maxLength)
+    public static string ForDiscord(string normalized, int maxLength, DiscordTarget target)
     {
         var text = normalized
             .Replace("@everyone", "@\u200Deveryone", StringComparison.OrdinalIgnoreCase)
@@ -92,11 +101,14 @@ public static class TextSanitizer
                 case '_':
                 case '~':
                 case '|':
-                // [ and ] matter here even though plain messages render them literally: EMBED
-                // descriptions render [text](url) as a masked hyperlink, which would let a player
-                // publish a link whose visible text hides the target — authored by the relay.
-                case '[':
-                case ']':
+                    builder.Append('\\').Append(c);
+                    break;
+
+                // [text](url) renders as a masked hyperlink in an embed description AND — because
+                // the sender is a webhook, not a human — in plain message content too. Escaping is
+                // kept mandatory for embeds and deliberately skipped for plain messages: see the
+                // DiscordTarget doc for the accepted risk and why.
+                case '[' or ']' when target == DiscordTarget.Embed:
                     builder.Append('\\').Append(c);
                     break;
 
@@ -128,11 +140,15 @@ public static class TextSanitizer
 
     /// <summary>
     /// Joins display lines with newlines and splits the result into chunks that each fit in one
-    /// embed description. Lines are never split across chunks (each line is clamped well below
-    /// the limit). Returns each chunk with the number of chat lines it carries, so the caller can
+    /// Discord message. Lines are never split across chunks (each line is clamped well below the
+    /// limit). Returns each chunk with the number of chat lines it carries, so the caller can
     /// report accepted/queued counts per webhook POST.
+    ///
+    /// <paramref name="maxChunkLength"/> is the destination's ceiling — <see cref="MaxContentLength"/>
+    /// for a plain message, <see cref="MaxDescriptionLength"/> for an embed description.
     /// </summary>
-    public static List<(string Text, int LineCount)> BuildDescriptions(IReadOnlyList<string> displayLines)
+    public static List<(string Text, int LineCount)> BuildChunks(
+        IReadOnlyList<string> displayLines, int maxChunkLength)
     {
         var chunks = new List<(string, int)>();
         var current = new StringBuilder();
@@ -142,7 +158,7 @@ public static class TextSanitizer
         {
             var needed = line.Length + (count > 0 ? 1 : 0);
 
-            if (count > 0 && current.Length + needed > MaxDescriptionLength)
+            if (count > 0 && current.Length + needed > maxChunkLength)
             {
                 chunks.Add((current.ToString(), count));
                 current.Clear();
@@ -178,4 +194,28 @@ public static class TextSanitizer
 
         return true;
     }
+}
+
+/// <summary>
+/// Which kind of Discord message sanitised text is bound for; it selects the bracket policy.
+///
+/// An embed description renders <c>[text](url)</c> as a masked hyperlink, so the embed path
+/// escapes brackets unconditionally — a disguised link there would publish under the relay's own
+/// name, and escaping costs nothing visible (Discord consumes the backslashes).
+///
+/// IMPORTANT — plain messages are NOT the safe case they look like: masked links are rendered in
+/// <c>content</c> too when the author is a webhook or bot (only human-typed messages show the
+/// brackets literally). Leaving brackets unescaped therefore lets a player's <c>[text](url)</c>
+/// render as a clickable masked link in guild chat. This is an ACCEPTED RISK, decided 2026-08-10:
+/// the channel is a small private guild of trusted members, and escaping would put visible
+/// backslashes around the game-supplied "[GuildChat]" prefix on every line. Revisit before ever
+/// pointing this relay at a public or untrusted channel.
+/// </summary>
+public enum DiscordTarget
+{
+    /// <summary>An embed description. Brackets MUST be escaped.</summary>
+    Embed,
+
+    /// <summary>A message's <c>content</c>. Brackets left alone — see the accepted risk above.</summary>
+    PlainMessage
 }

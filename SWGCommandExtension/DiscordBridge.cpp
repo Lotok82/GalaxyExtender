@@ -94,6 +94,25 @@ const size_t MAX_INCOMING_MESSAGES = 25;       // contract is ≤5/poll and we p
 const size_t MAX_PARSED_FIELD_BYTES = 2048;    // parser-level clamp per string field, ditto
 const size_t MAX_MARKED_SENDER_CHARS = 48;     // display rewrite: longest plausible "Name: " prefix
 
+// --- World boss alerts (Documentation/world-boss-alert-plan.md) ---
+
+const size_t MAX_ALERT_TAGS = 16;              // ini list cap
+const size_t MAX_ALERT_TAG_CHARS = 64;
+
+// Capped like the tags, and additionally because /emu discord status prints the
+// whole list into a fixed 512-byte line — an uncapped list would overflow it and
+// sprintf_s's invalid-parameter handler terminates the PROCESS, i.e. a config
+// file crashing the game from a status command.
+const size_t MAX_ALERT_CHANNEL_TYPES = 16;
+
+// Backstop, not a policy: a real boss alert fires a handful of times an hour, so
+// anything approaching this rate means a mis-set alert_channel_types has pointed
+// the scan at a chatty channel. The relay's rate limit is shared by the whole
+// guild on ONE key, so a single mis-configured client must not be able to spend
+// it. Suppressed lines are counted and shown by /emu discord status.
+const size_t MAX_ALERTS_PER_WINDOW = 10;
+const ULONGLONG ALERT_WINDOW_MS = 60000;
+
 // ============================================================================
 // State
 // ============================================================================
@@ -101,7 +120,16 @@ const size_t MAX_MARKED_SENDER_CHARS = 48;     // display rewrite: longest plaus
 struct Config {
 	bool enabled;
 	bool stage2;            // this client polls/injects Discord messages
+	bool alerts;            // this client relays tagged broadcasts (world boss alerts)
 	int channelType;
+	// Channels scanned for alert tags, and the tags themselves. BOTH are ini keys
+	// with built-in defaults, deliberately: the tags are stable literals so this
+	// should never need changing, but if the server rewords one or broadcasts on a
+	// channel we did not expect, the fix must be a text-file edit rather than a new
+	// DLL for every player (see Documentation/world-boss-alert-plan.md and
+	// the extension-deploy constraint it works around).
+	std::vector<int> alertChannelTypes;
+	std::vector<std::wstring> alertTags;
 	bool https;
 	INTERNET_PORT port;
 	std::wstring host;
@@ -114,10 +142,23 @@ struct Config {
 	std::string galaxy;
 	bool valid;
 	std::string error;      // why !valid, shown by /emu discord status
+	// Why alerts are OFF despite alerts=1: a malformed alert_* ini key. Kept apart
+	// from `error` on purpose — an alert typo must not invalidate the whole config
+	// and take guild-chat relaying down with it. Shown by /emu discord status.
+	std::string alertError;
 
 	Config()
-		: enabled(false), stage2(true), channelType(ChatChannelId::CT_guild_default), https(true),
+		: enabled(false), stage2(true), alerts(true),
+		  channelType(ChatChannelId::CT_guild_default), https(true),
 		  port(INTERNET_DEFAULT_HTTPS_PORT), valid(false) {
+		// CT_systemMessage and CT_quest: where a scripted server broadcast lands.
+		// Deliberately NOT CT_combat (4) or CT_spatial (2) — the two highest-volume
+		// channels, and spatial is the one a player could type a fake tag into.
+		alertChannelTypes.push_back(5);
+		alertChannelTypes.push_back(11);
+
+		alertTags.push_back(L"[PvE World Boss]");
+		alertTags.push_back(L"[PvP World Boss]");
 	}
 };
 
@@ -196,6 +237,13 @@ unsigned long long s_lastRelayedFrame = 0;
 ULONGLONG s_lastRelayedTick = 0;
 const void* s_lastRelayedTab = nullptr;   // identity only, never dereferenced
 ULONGLONG s_nextInjectTick = 0;           // S6 pacing
+
+// --- main thread only (alerts) ---
+unsigned long s_alertsCaptured = 0;
+unsigned long s_alertsSuppressed = 0;     // dropped by the per-minute backstop
+size_t s_alertWindowCount = 0;
+ULONGLONG s_alertWindowStart = 0;
+std::string s_lastAlertSample;
 
 // --- cross-thread flags ---
 volatile LONG s_authFailed = 0;   // 401 latch: bad key, retrying cannot help
@@ -786,6 +834,37 @@ bool parseEndpoint(const std::wstring& endpoint, Config& config) {
 	return true;
 }
 
+// Splits a comma-separated ini list, trimming spaces and tabs around each entry
+// and dropping empties. Tags may contain spaces and brackets, so only the comma
+// separates — "[PvE World Boss], [PvP World Boss]" is two entries.
+void splitList(const std::wstring& value, std::vector<std::wstring>& out) {
+	out.clear();
+
+	size_t start = 0;
+
+	while (start <= value.size()) {
+		size_t comma = value.find(L',', start);
+		size_t end = (comma == std::wstring::npos) ? value.size() : comma;
+
+		size_t left = start;
+		size_t right = end;
+
+		while (left < right && (value[left] == L' ' || value[left] == L'\t'))
+			++left;
+
+		while (right > left && (value[right - 1] == L' ' || value[right - 1] == L'\t'))
+			--right;
+
+		if (right > left)
+			out.push_back(value.substr(left, right - left));
+
+		if (comma == std::wstring::npos)
+			break;
+
+		start = comma + 1;
+	}
+}
+
 std::string clampLabel(const std::wstring& value) {
 	std::string narrow = narrowLossy(value);
 
@@ -929,9 +1008,66 @@ Config loadConfigFromDisk() {
 	std::wstring channelType = readIniValue(path, L"channel_type", L"");
 	std::wstring allowHttp = readIniValue(path, L"allow_http", L"0");
 	std::wstring stage2 = readIniValue(path, L"stage2", L"1");
+	std::wstring alerts = readIniValue(path, L"alerts", L"1");
+	std::wstring alertTypes = readIniValue(path, L"alert_channel_types", L"");
+	std::wstring alertTags = readIniValue(path, L"alert_tags", L"");
 
 	config.enabled = !(enabled == L"0" || enabled == L"false" || enabled == L"no");
 	config.stage2 = !(stage2 == L"0" || stage2 == L"false" || stage2 == L"no");
+	config.alerts = !(alerts == L"0" || alerts == L"false" || alerts == L"no");
+
+	// Both lists REPLACE their defaults when set rather than adding to them, so a
+	// tag or channel can be retired and not only added.
+	//
+	// A malformed value still fails loudly — but by switching ALERTS off and saying
+	// so in /emu discord status, never by invalidating the whole config. Alerts are
+	// the optional extra here; a typo in their keys must not take down guild-chat
+	// relaying while it gets fixed.
+	if (config.alerts && !alertTypes.empty()) {
+		std::vector<std::wstring> fields;
+		splitList(alertTypes, fields);
+
+		config.alertChannelTypes.clear();
+
+		for (size_t i = 0; i < fields.size(); ++i) {
+			// Same strict parse as channel_type, for the same reason: a typo must
+			// not silently retarget the scan at channel 0.
+			wchar_t* parseEnd = nullptr;
+			long parsed = wcstol(fields[i].c_str(), &parseEnd, 10);
+
+			if (parseEnd == fields[i].c_str() || *parseEnd != L'\0' || parsed < 0) {
+				config.alerts = false;
+				config.alertError = "alert_channel_types in DiscordBridge.ini must be "
+					"a comma-separated list of non-negative numbers";
+				break;
+			}
+
+			config.alertChannelTypes.push_back(static_cast<int>(parsed));
+
+			if (config.alertChannelTypes.size() >= MAX_ALERT_CHANNEL_TYPES)
+				break;   // status prints this list into a fixed buffer; cap it like the tags
+		}
+	}
+
+	if (config.alerts && !alertTags.empty()) {
+		std::vector<std::wstring> fields;
+		splitList(alertTags, fields);
+
+		config.alertTags.clear();
+
+		for (size_t i = 0; i < fields.size(); ++i) {
+			if (fields[i].size() > MAX_ALERT_TAG_CHARS) {
+				config.alerts = false;
+				config.alertError = "an entry in alert_tags in DiscordBridge.ini is too long";
+				break;
+			}
+
+			config.alertTags.push_back(fields[i]);
+
+			if (config.alertTags.size() >= MAX_ALERT_TAGS)
+				break;   // a pathological list must not make the scan expensive
+		}
+	}
 
 	if (!channelType.empty()) {
 		// Strict parse. _wtoi would turn "guild" (or any typo) into 0 and
@@ -2096,6 +2232,69 @@ bool ensureInitialized() {
 // Capture path (main thread)
 // ============================================================================
 
+bool isAlertChannelType(int type) {
+	for (size_t i = 0; i < s_config.alertChannelTypes.size(); ++i) {
+		if (s_config.alertChannelTypes[i] == type)
+			return true;
+	}
+
+	return false;
+}
+
+// Case-insensitive ASCII compare of `tag` against the start of `text`.
+//
+// Matching at the START is the anti-spoof rule, not a formatting preference: a
+// server broadcast reaches this hook with no sender prefix, whereas anything a
+// player types arrives as "Kaelen: [PvP World Boss] ..." and so cannot match.
+// Searching anywhere in the line would let any player publish a red alert.
+//
+// Case-insensitive because the exact casing the server broadcasts is unverified
+// until the first live alert; a mismatch would silently relay nothing while
+// looking identical to the feature simply not working. The relay matches the
+// same way.
+bool startsWithTag(const std::wstring& text, const std::wstring& tag) {
+	if (tag.empty() || text.size() < tag.size())
+		return false;
+
+	for (size_t i = 0; i < tag.size(); ++i) {
+		wchar_t a = text[i];
+		wchar_t b = tag[i];
+
+		if (a >= L'A' && a <= L'Z') a = static_cast<wchar_t>(a - L'A' + L'a');
+		if (b >= L'A' && b <= L'Z') b = static_cast<wchar_t>(b - L'A' + L'a');
+
+		if (a != b)
+			return false;
+	}
+
+	return true;
+}
+
+bool matchesAlertTag(const std::wstring& cleaned) {
+	for (size_t i = 0; i < s_config.alertTags.size(); ++i) {
+		if (startsWithTag(cleaned, s_config.alertTags[i]))
+			return true;
+	}
+
+	return false;
+}
+
+// Sliding-window backstop. Returns false when this alert must be dropped.
+bool allowAlertNow(ULONGLONG now) {
+	if (s_alertWindowStart == 0 || now - s_alertWindowStart >= ALERT_WINDOW_MS) {
+		s_alertWindowStart = now;
+		s_alertWindowCount = 0;
+	}
+
+	if (s_alertWindowCount >= MAX_ALERTS_PER_WINDOW) {
+		++s_alertsSuppressed;
+		return false;
+	}
+
+	++s_alertWindowCount;
+	return true;
+}
+
 void noteChannelType(int type, const std::wstring& cleaned) {
 	for (size_t i = 0; i < s_observed.size(); ++i) {
 		if (s_observed[i].type == type) {
@@ -2659,7 +2858,12 @@ void onChatAppendImpl(const void* tab, const void* channelId, const void* chatSt
 	if (!seh_readChannelType(channelId, channelType))
 		return;
 
-	bool interesting = (channelType == s_config.channelType);
+	// Two reasons a channel can be interesting. Guild chat relays wholesale;
+	// an alert channel relays only lines that start with a configured tag, which
+	// is checked below once the text has been cleaned.
+	bool guildChannel = (channelType == s_config.channelType);
+	bool alertChannel = s_config.alerts && !guildChannel && isAlertChannelType(channelType);
+	bool interesting = guildChannel || alertChannel;
 	bool newType = true;
 
 	for (size_t i = 0; i < s_observed.size(); ++i) {
@@ -2700,6 +2904,12 @@ void onChatAppendImpl(const void* tab, const void* channelId, const void* chatSt
 	if (cleaned.empty())
 		return;   // relay rejects blank text, and it would fail the whole batch
 
+	// On an alert channel the tag is the whole gate. Everything else on these
+	// channels is the player's own business — mission, loot and error messages —
+	// and must never leave the machine.
+	if (alertChannel && !matchesAlertTag(cleaned))
+		return;
+
 	std::string utf8;
 
 	if (!DiscordBridge::utf16ToUtf8(cleaned.c_str(), cleaned.size(), utf8) || utf8.empty())
@@ -2709,6 +2919,16 @@ void onChatAppendImpl(const void* tab, const void* channelId, const void* chatSt
 
 	if (localDuplicate(utf8, tab, now))
 		return;
+
+	// After the multi-tab dedupe, so one broadcast shown in three tabs costs one
+	// slot rather than three.
+	if (alertChannel) {
+		if (!allowAlertNow(now))
+			return;
+
+		++s_alertsCaptured;
+		s_lastAlertSample = utf8;
+	}
 
 	enqueue(utf8, computeOccurrence(utf8, now));
 }
@@ -2927,6 +3147,49 @@ void DiscordBridge::appendStatus(std::string& out) {
 		config.channelType, static_cast<unsigned long long>(s_frameCounter));
 	out += line;
 
+	// --- World boss alerts ---
+
+	if (!config.alerts) {
+		if (!config.alertError.empty()) {
+			// A malformed alert_* key switched alerts off; the rest of the bridge
+			// keeps running. alertError is a fixed literal well under the buffer.
+			sprintf_s(line, sizeof(line), "  alerts: \\#ff4444off\\#ffffff - %s\n",
+				config.alertError.c_str());
+			out += line;
+		} else {
+			out += "  alerts: \\#ffcc00off\\#ffffff (alerts=0 in DiscordBridge.ini)\n";
+		}
+	} else {
+		std::string types;
+
+		for (size_t i = 0; i < config.alertChannelTypes.size(); ++i) {
+			char number[16];
+			sprintf_s(number, sizeof(number), "%s%d", i == 0 ? "" : ",", config.alertChannelTypes[i]);
+			types += number;
+		}
+
+		sprintf_s(line, sizeof(line), "  alerts: on   channel type(s): %s   tag(s): %u\n",
+			types.empty() ? "(none)" : types.c_str(),
+			static_cast<unsigned>(config.alertTags.size()));
+		out += line;
+
+		sprintf_s(line, sizeof(line), "  alerts captured: %lu\n", s_alertsCaptured);
+		out += line;
+
+		if (s_alertsSuppressed != 0) {
+			// Worth shouting about: it means alert_channel_types is pointed at a
+			// chatty channel and this client is spending the guild's shared quota.
+			sprintf_s(line, sizeof(line), "  \\#ffcc00alerts suppressed: %lu\\#ffffff"
+				" - check alert_channel_types in DiscordBridge.ini\n", s_alertsSuppressed);
+			out += line;
+		}
+
+		if (!s_lastAlertSample.empty()) {
+			sprintf_s(line, sizeof(line), "  last alert: %.120s\n", s_lastAlertSample.c_str());
+			out += line;
+		}
+	}
+
 	sprintf_s(line, sizeof(line), "  queue: %u line(s)   60s history: %u   dropped: %lu\n",
 		static_cast<unsigned>(queueDepth), static_cast<unsigned>(s_history.size()), linesDropped);
 	out += line;
@@ -3009,6 +3272,21 @@ void DiscordBridge::appendStatus(std::string& out) {
 	}
 }
 
+bool DiscordBridge::isAlertLine(const wchar_t* text, size_t length) {
+	ensureInitialized();
+
+	if (text == nullptr || length == 0 || !s_config.alerts)
+		return false;
+
+	return matchesAlertTag(std::wstring(text, length));
+}
+
+bool DiscordBridge::isAlertChannel(int channelType) {
+	ensureInitialized();
+
+	return s_config.alerts && isAlertChannelType(channelType);
+}
+
 void DiscordBridge::appendChannelTypes(std::string& out) {
 	ensureInitialized();
 
@@ -3024,10 +3302,15 @@ void DiscordBridge::appendChannelTypes(std::string& out) {
 	for (size_t i = 0; i < s_observed.size(); ++i) {
 		const ObservedChannel& entry = s_observed[i];
 
+		const char* marker = "";
+
+		if (entry.type == s_config.channelType)
+			marker = " \\#00ff00<- relayed\\#ffffff";
+		else if (s_config.alerts && isAlertChannelType(entry.type))
+			marker = " \\#88ccff<- scanned for alert tags\\#ffffff";
+
 		sprintf_s(line, sizeof(line), "  type %-3d %6lu line(s)%s  %s\n",
-			entry.type, entry.count,
-			entry.type == s_config.channelType ? " \\#00ff00<- relayed\\#ffffff" : "",
-			entry.sample.c_str());
+			entry.type, entry.count, marker, entry.sample.c_str());
 		out += line;
 	}
 
@@ -3035,4 +3318,13 @@ void DiscordBridge::appendChannelTypes(std::string& out) {
 		"  Relaying type %d. If guild chat shows a different type, set "
 		"channel_type in DiscordBridge.ini.\n", s_config.channelType);
 	out += line;
+
+	if (s_config.alerts) {
+		// The one thing this command is for now that guild chat is settled: finding
+		// which channel a world boss broadcast actually arrives on. The sample shown
+		// is the FIRST line ever seen for a type, so it will usually be ordinary
+		// traffic rather than the alert itself — the type number is the useful part.
+		out += "  Alert tags are scanned on the types marked above; widen "
+			"alert_channel_types if a boss alert shows up on another one.\n";
+	}
 }

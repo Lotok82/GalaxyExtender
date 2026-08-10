@@ -64,8 +64,45 @@ public sealed class DiscordOptions
     public string? ConfiguredBotUserId =>
         string.IsNullOrWhiteSpace(BotUserId) ? null : BotUserId;
 
-    /// <summary>Embed colour for game -> Discord lines. 0x2ECC71 green, per the bridge plan.</summary>
+    /// <summary>
+    /// Embed colour for game -> Discord lines. 0x2ECC71 green, per the bridge plan. No longer used
+    /// by guild chat, which posts as a plain message — kept because it is what a revert of that
+    /// change would read again, and because it documents the colour the channel used to be.
+    /// </summary>
     public int EmbedColor { get; set; } = 3066993;
+
+    /// <summary>
+    /// Operator switch for the world boss alert feed: lines whose text begins with one of
+    /// <see cref="ResolvedAlertTags"/> publish as a coloured embed instead of as ordinary chat.
+    /// Off by default like the switches above — a redeploy alone must never change how a guild's
+    /// channel looks.
+    /// </summary>
+    public bool AlertsEnabled { get; set; }
+
+    /// <summary>
+    /// Tag -> embed colour. Configuring ANY tag replaces the built-in set outright rather than
+    /// merging with it (the property is null until bound), so an operator can rename or remove a
+    /// tag, not only add one.
+    /// </summary>
+    public Dictionary<string, int>? AlertTags { get; set; }
+
+    /// <summary>
+    /// The tags actually in force, matched case-INSENSITIVELY. Case-insensitive on purpose: the
+    /// exact casing the server broadcasts is unverified until the first live alert, and a mismatch
+    /// there would silently drop every alert while looking like the feature simply not working.
+    /// Insensitivity costs nothing and removes that failure mode.
+    /// </summary>
+    public IReadOnlyDictionary<string, int> ResolvedAlertTags =>
+        AlertTags is { Count: > 0 }
+            ? new Dictionary<string, int>(AlertTags, StringComparer.OrdinalIgnoreCase)
+            : DefaultAlertTags;
+
+    /// <summary>0x2ECC71 green for PvE, 0xE74C3C red for PvP — the user's choice, 2026-08-10.</summary>
+    private static readonly Dictionary<string, int> DefaultAlertTags = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["[PvE World Boss]"] = 3066993,
+        ["[PvP World Boss]"] = 15158332
+    };
 
     /// <summary>
     /// Add the contributing client id to the embed as a debug field. Off by default: in relay
@@ -101,6 +138,13 @@ public sealed class DiscordOptions
         !string.IsNullOrWhiteSpace(BotToken) &&
         !string.IsNullOrWhiteSpace(ChannelId) &&
         ChannelId.All(char.IsAsciiDigit);
+
+    /// <summary>
+    /// The alert feed is live: enabled AND the webhook is usable. Deliberately NOT dependent on the
+    /// bot token — alerts arrive from the game and go out through the same webhook as chat, so none
+    /// of the bot-side configuration is involved.
+    /// </summary>
+    public bool IsAlertsConfigured => AlertsEnabled && IsConfigured;
 
     /// <summary>
     /// The bot answers commands: enabled AND plausibly credentialed. Independent of

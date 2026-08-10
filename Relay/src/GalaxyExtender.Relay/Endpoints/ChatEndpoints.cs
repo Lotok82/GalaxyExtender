@@ -27,6 +27,7 @@ public static class ChatEndpoints
                 IOptionsMonitor<RelayOptions> relayOptions,
                 IOptionsMonitor<DiscordOptions> discordOptions,
                 DedupeService dedupe,
+                AlertRules alerts,
                 DiscordPublisher publisher,
                 Outbox outbox,
                 Stage2Queue stage2Queue,
@@ -85,7 +86,7 @@ public static class ChatEndpoints
                 // forwarded to Discord, matched or not (stage2 plan, "Marker and echo rules").
                 // Every relaying client sends its own copy; acking is idempotent.
                 var markedLines = 0;
-                var prepared = new List<(string Key, string Display)>(lines.Count);
+                var prepared = new List<DedupeService.PreparedLine>(lines.Count);
 
                 foreach (var line in lines)
                 {
@@ -97,9 +98,17 @@ public static class ChatEndpoints
                         continue;
                     }
 
-                    prepared.Add((
+                    // Classify before sanitising: the two destinations escape differently, and the
+                    // tag would not survive being escaped for the wrong one.
+                    var alert = alerts.Match(normalized);
+
+                    prepared.Add(new DedupeService.PreparedLine(
                         DedupeService.Key(normalized, line.Occurrence!.Value),
-                        TextSanitizer.ForDiscord(normalized, relayOptions.CurrentValue.MaxLineLength)));
+                        TextSanitizer.ForDiscord(
+                            normalized,
+                            relayOptions.CurrentValue.MaxLineLength,
+                            alert is null ? DiscordTarget.PlainMessage : DiscordTarget.Embed),
+                        alert));
                 }
 
                 var admission = dedupe.Admit(batchId, clientId, prepared);
@@ -119,13 +128,11 @@ public static class ChatEndpoints
 
                 if (admission.UniqueLines.Count > 0)
                 {
-                    var chunks = TextSanitizer.BuildDescriptions(admission.UniqueLines);
+                    var chunks = BuildPayloads(admission.UniqueLines, publisher, clientId);
                     var failed = false;
 
-                    foreach (var (text, lineCount) in chunks)
+                    foreach (var (payload, lineCount) in chunks)
                     {
-                        var payload = publisher.BuildPayload(text, clientId);
-
                         if (!failed)
                         {
                             // Deliberately NOT the request token. Once the batch is admitted the
@@ -200,6 +207,59 @@ public static class ChatEndpoints
             await commands.ScanIfDueAsync(cancellationToken);
             return Results.Ok(new { outbox = outbox.Depth });
         });
+    }
+
+    /// <summary>
+    /// Turns admitted lines into webhook payloads, preserving arrival order.
+    ///
+    /// Consecutive lines that render the same way share a payload; a change of rendering starts a
+    /// new one. Grouping all chat together and all alerts together would be fewer POSTs, but it
+    /// would also reorder a batch against the order the guild actually said things. Alerts are
+    /// rare, so in practice this is one payload per batch exactly as before, and an alert simply
+    /// splits the batch around itself.
+    ///
+    /// The two renderings differ in more than colour: chat is a plain message capped at Discord's
+    /// 2000-character `content` limit, an alert is an embed description capped at 4096.
+    /// </summary>
+    private static List<(string Payload, int LineCount)> BuildPayloads(
+        IReadOnlyList<DedupeService.PreparedLine> lines,
+        DiscordPublisher publisher,
+        string? clientId)
+    {
+        var payloads = new List<(string, int)>();
+        var index = 0;
+
+        while (index < lines.Count)
+        {
+            // Colour is the grouping key rather than the rule: two tags sharing a colour can share
+            // an embed, and null means ordinary chat.
+            var color = lines[index].Alert?.Color;
+            var run = new List<string>();
+
+            while (index < lines.Count && lines[index].Alert?.Color == color)
+            {
+                run.Add(lines[index].DisplayText);
+                index++;
+            }
+
+            // Chat reserves headroom for the client subtext BuildPayload may append AFTER
+            // chunking — a chunk built exactly to 2000 would otherwise exceed the limit once
+            // the suffix lands and be rejected on every delivery attempt.
+            var limit = color is null
+                ? TextSanitizer.MaxContentLength - publisher.PlainContentReserve
+                : TextSanitizer.MaxDescriptionLength;
+
+            foreach (var (text, lineCount) in TextSanitizer.BuildChunks(run, limit))
+            {
+                payloads.Add((
+                    color is null
+                        ? publisher.BuildPayload(text, clientId)
+                        : publisher.BuildEmbedPayload(text, color.Value, clientId),
+                    lineCount));
+            }
+        }
+
+        return payloads;
     }
 
     /// <summary>Log category marker for chat batch handling.</summary>

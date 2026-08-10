@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Discord Chat Bridge — Relay Guide (operator)</title>
+<style>
+  body {
+    font-family: "Segoe UI", Arial, sans-serif;
+    max-width: 800px;
+    margin: 2rem auto;
+    padding: 0 1.25rem;
+    line-height: 1.6;
+    color: #222;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.7rem; border-bottom: 2px solid #3498db; padding-bottom: .4rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; color: #1a5276; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #1a5276; }
+  code, pre {
+    font-family: Consolas, monospace;
+    background: #eff2f5;
+    border-radius: 4px;
+  }
+  code { padding: .1rem .35rem; }
+  pre { padding: .8rem 1rem; overflow-x: auto; border: 1px solid #dbe2e8; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #d3dae0; padding: .5rem .7rem; text-align: left; vertical-align: top; }
+  th { background: #ecf4fa; }
+  .tip {
+    background: #ecf4fa;
+    border-left: 4px solid #3498db;
+    padding: .7rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .warn {
+    background: #fdf3e7;
+    border-left: 4px solid #e67e22;
+    padding: .7rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 4px 4px 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>Discord Chat Bridge — Relay Guide</h1>
+
+<p>This guide is for the <strong>operator</strong> — the one person who hosts the relay,
+the small web service that sits between everyone's game and Discord. Players' games send
+their chat here; the relay throws away the duplicate copies, posts a single copy to
+Discord, and hands Discord replies back to the games. It is the only part that ever talks
+to Discord.</p>
+
+<p>Players don't need any of this — point them at the player guide in the
+<code>SWGCommandExtension</code> folder instead.</p>
+
+<h2>Where settings go</h2>
+
+<p>Settings are given either as <strong>environment variables</strong> on the server
+(written with double underscores, like <code>Discord__WebhookUrl</code>) or in a private
+file called <code>appsettings.Production.json</code> next to the app (written in sections,
+like <code>"Discord": { "WebhookUrl": "..." }</code>). Both spellings below mean the same
+setting.</p>
+
+<div class="warn">
+  Never put real keys or tokens in <code>appsettings.json</code> itself — that file is part
+  of the shared project. The private file and environment variables exist so secrets stay
+  on the server.
+</div>
+
+<h2>The essentials</h2>
+
+<p>These four get the bridge going. Only the first two are needed for the basic
+game&nbsp;→&nbsp;Discord direction.</p>
+
+<table>
+  <tr><th>Setting</th><th>What it is</th></tr>
+  <tr>
+    <td><code>Discord__WebhookUrl</code></td>
+    <td>The Discord webhook for your bridge channel. In Discord: channel settings →
+    <em>Integrations</em> → <em>Webhooks</em> → create one and copy its URL. This is what
+    posts guild chat <strong>into Discord</strong>.</td>
+  </tr>
+  <tr>
+    <td><code>Relay__ApiKeys__guild</code></td>
+    <td>A password you make up that lets players use the relay — generate one in PowerShell
+    with <code>[guid]::NewGuid().ToString()</code> and hand it to your guild members; it's
+    the <code>key</code> they put in their ini file. The word after <code>ApiKeys__</code>
+    is just a label for your logs. You can list more than one key, which is how you swap to
+    a new key gradually: add the new one, let people move over, then remove the old.</td>
+  </tr>
+  <tr>
+    <td><code>Discord__BotToken</code></td>
+    <td>A Discord bot's token — needed only for the features marked "needs the bot" below.
+    The bot must be invited to your server and able to see the bridge channel.</td>
+  </tr>
+  <tr>
+    <td><code>Discord__ChannelId</code></td>
+    <td>The ID number of the bridge channel (right-click the channel in Discord →
+    <em>Copy Channel ID</em>; you may need Developer Mode enabled in Discord's settings).</td>
+  </tr>
+</table>
+
+<h2>Feature switches</h2>
+
+<p>Every feature beyond basic chat forwarding starts <strong>off</strong>, so an update can
+never change what appears in your channel by itself. Turn each on when you're ready:</p>
+
+<table>
+  <tr><th>Setting</th><th>What turning it on does</th></tr>
+  <tr>
+    <td><code>Discord__Stage2Enabled</code></td>
+    <td>Messages typed in the Discord channel are carried into guild chat in-game.
+    Needs the bot.</td>
+  </tr>
+  <tr>
+    <td><code>Discord__AlertsEnabled</code></td>
+    <td>World boss announcements are posted as colour-coded alert boxes instead of plain
+    chat — see the next section. Works without the bot.</td>
+  </tr>
+  <tr>
+    <td><code>Discord__CleanupEnabled</code></td>
+    <td>Old messages in the bridge channel are deleted after about 5 hours (pinned ones are
+    kept), so the channel works like a live ticker rather than an archive. Needs the bot,
+    with the <em>Manage Messages</em> and <em>Read Message History</em> permissions.</td>
+  </tr>
+  <tr>
+    <td><code>Discord__CommandsEnabled</code></td>
+    <td>The bot answers <code>@YourBot status</code> in the channel with who currently has
+    the bridge running in-game. Needs the bot, with <em>Send Messages</em> and
+    <em>Read Message History</em>.</td>
+  </tr>
+</table>
+
+<h2>World boss alerts</h2>
+
+<p>With <code>Discord__AlertsEnabled</code> set to <code>true</code>, a chat line that
+<em>starts</em> with a recognised phrase is posted as a coloured alert box instead of plain
+chat. Out of the box:</p>
+
+<ul>
+  <li><code>[PvE World Boss]</code> — green</li>
+  <li><code>[PvP World Boss]</code> — red</li>
+</ul>
+
+<p>To change the phrases or colours, set <code>Discord__AlertTags</code>: each entry is a
+phrase and a colour number. Colours are given as plain numbers — pick a colour in any
+online colour picker and use its decimal value (green is <code>3066993</code>, red is
+<code>15158332</code>). For example, in <code>appsettings.Production.json</code>:</p>
+
+<pre>"Discord": {
+  "AlertsEnabled": true,
+  "AlertTags": {
+    "[Server]": 255,
+    "[Invasion]": 15158332
+  }
+}</pre>
+
+<p>Worth knowing:</p>
+<ul>
+  <li>Setting <strong>any</strong> phrase replaces the built-in pair completely, so you can
+      retire a phrase, not just add one.</li>
+  <li>Capital letters don't matter when matching.</li>
+  <li>If one phrase begins with another (say <code>[Boss]</code> and
+      <code>[Boss Elite]</code>), the longer one wins.</li>
+  <li>A line whose phrase the relay doesn't recognise is posted as ordinary chat rather
+      than dropped — nothing is ever lost, it just isn't dressed up.</li>
+</ul>
+
+<h2>Appearance and odds &amp; ends</h2>
+
+<table>
+  <tr><th>Setting</th><th>Normally</th><th>What it does</th></tr>
+  <tr>
+    <td><code>Discord__ShowContributingClient</code></td><td>off</td>
+    <td>Adds a small note to each Discord post naming which player's game supplied it.
+    Purely for troubleshooting; leave off day to day.</td>
+  </tr>
+  <tr>
+    <td><code>Discord__BotUserId</code></td><td>(blank)</td>
+    <td>The bot's own ID. Leave blank — the relay looks it up by itself. A wrong value here
+    makes the bot ignore everyone.</td>
+  </tr>
+  <tr>
+    <td><code>Discord__EmbedColor</code></td><td><code>3066993</code></td>
+    <td>The green that guild chat used back when it was posted in a box. No longer used —
+    kept only so switching back is easy.</td>
+  </tr>
+</table>
+
+<h2>Fine-tuning</h2>
+
+<p>Everything below already has a sensible value and can be ignored. It's listed so you know
+what's adjustable — change things only if you have a reason to.</p>
+
+<h3>Chat handling</h3>
+<table>
+  <tr><th>Setting (under <code>Relay__</code>)</th><th>Normally</th><th>What it controls</th></tr>
+  <tr><td><code>DedupeWindowSeconds</code></td><td>15</td>
+      <td>How long the relay remembers a chat line so the copies arriving from every guild
+      member's game are posted only once.</td></tr>
+  <tr><td><code>BatchIdWindowSeconds</code></td><td>300</td>
+      <td>How long the relay remembers a delivery it has already processed, so a game
+      retrying a slow connection can't cause a double post.</td></tr>
+  <tr><td><code>MaxLinesPerBatch</code></td><td>50</td>
+      <td>The most chat lines accepted in one delivery from a game.</td></tr>
+  <tr><td><code>MaxLineLength</code></td><td>512</td>
+      <td>The longest single chat line accepted, in characters.</td></tr>
+  <tr><td><code>RateLimitPermitsPerMinute</code></td><td>600</td>
+      <td>How many requests per minute one key may make in total. The whole guild shares one
+      key, so raise this if the guild grows very chatty.</td></tr>
+  <tr><td><code>RequireHttps</code></td><td>off</td>
+      <td>Refuse unencrypted connections outright. Turn on once the health page confirms
+      the server reports encrypted connections correctly.</td></tr>
+</table>
+
+<h3>If Discord is briefly unreachable</h3>
+<table>
+  <tr><th>Setting</th><th>Normally</th><th>What it controls</th></tr>
+  <tr><td><code>OutboxMaxEntries</code></td><td>200</td>
+      <td>How many undelivered posts are kept waiting for another try before the oldest is
+      let go.</td></tr>
+  <tr><td><code>OutboxMaxAttempts</code></td><td>10</td>
+      <td>How many tries each waiting post gets before it's given up on (with a note in the
+      logs).</td></tr>
+  <tr><td><code>StateFilePath</code></td><td>(automatic)</td>
+      <td>Where the relay keeps its memory file — waiting posts, recent lines, who's online —
+      so nothing is lost when the app restarts.</td></tr>
+</table>
+
+<h3>Discord → game delivery</h3>
+<table>
+  <tr><th>Setting</th><th>Normally</th><th>What it controls</th></tr>
+  <tr><td><code>Stage2RedeliveryTimeoutSeconds</code></td><td>60</td>
+      <td>If the game that picked up a Discord message goes quiet, how long before the
+      message is offered to another game.</td></tr>
+  <tr><td><code>Stage2MaxDeliveries</code></td><td>3</td>
+      <td>Total attempts per message before it's dropped.</td></tr>
+  <tr><td><code>Stage2TtlSeconds</code></td><td>300</td>
+      <td>A Discord message older than this is dropped rather than delivered stale.</td></tr>
+  <tr><td><code>Stage2MaxPending</code></td><td>50</td>
+      <td>How many Discord messages may queue up waiting for a game to collect them.</td></tr>
+  <tr><td><code>Stage2MaxPerPoll</code></td><td>5</td>
+      <td>How many messages one game is handed per check-in.</td></tr>
+  <tr><td><code>Stage2FetchCacheSeconds</code></td><td>2.5</td>
+      <td>How long a look at the Discord channel is reused before looking again, so many
+      players online doesn't mean many calls to Discord.</td></tr>
+</table>
+
+<h3>Channel tidy-up</h3>
+<table>
+  <tr><th>Setting</th><th>Normally</th><th>What it controls</th></tr>
+  <tr><td><code>CleanupMaxAgeHours</code></td><td>5</td>
+      <td>Messages older than this are deleted (pinned ones never are).</td></tr>
+  <tr><td><code>CleanupIntervalMinutes</code></td><td>15</td>
+      <td>The shortest gap between tidy-up passes.</td></tr>
+  <tr><td><code>CleanupMaxSingleDeletesPerSweep</code></td><td>5</td>
+      <td>A brake on the slower one-by-one deletions that very old messages need — only
+      relevant the first time an old channel is tidied.</td></tr>
+</table>
+
+<h3>Who's online, and the status bot</h3>
+<table>
+  <tr><th>Setting</th><th>Normally</th><th>What it controls</th></tr>
+  <tr><td><code>PresenceOnlineWindowSeconds</code></td><td>180</td>
+      <td>How recently a game must have checked in to count as online.</td></tr>
+  <tr><td><code>PresenceWriteIntervalSeconds</code></td><td>30</td>
+      <td>How often each player's "last seen" note is saved to disk (a brake on disk
+      activity, nothing more).</td></tr>
+  <tr><td><code>PresenceRetentionDays</code></td><td>7</td>
+      <td>How long someone who stopped playing stays on the "has the bridge installed"
+      list.</td></tr>
+  <tr><td><code>PresenceMaxClients</code></td><td>200</td>
+      <td>A ceiling on that list, as a safety margin.</td></tr>
+  <tr><td><code>CommandScanIntervalSeconds</code></td><td>15</td>
+      <td>The shortest gap between checks for someone mentioning the bot.</td></tr>
+  <tr><td><code>CommandMaxAgeSeconds</code></td><td>300</td>
+      <td>A mention older than this gets no reply — better silent than out of date.</td></tr>
+  <tr><td><code>CommandMaxRepliesPerScan</code></td><td>3</td>
+      <td>The most replies posted per check, so the bot can't flood its own channel.</td></tr>
+  <tr><td><code>DeliveryNoticeIntervalMinutes</code></td><td>15</td>
+      <td>The shortest gap between "nobody is in game to receive this" notices.</td></tr>
+</table>
+
+<h3>Keeping things moving when nobody is online</h3>
+<table>
+  <tr><th>Setting</th><th>Normally</th><th>What it controls</th></tr>
+  <tr><td><code>BackgroundTickSeconds</code></td><td>60</td>
+      <td>How often the relay does its background round (retry waiting posts, tidy the
+      channel, answer the bot) even with nobody in game. <code>0</code> switches the round
+      off entirely.</td></tr>
+  <tr><td><code>SelfPingUrl</code></td><td>(blank)</td>
+      <td>A web address the relay visits once per round to keep itself awake — only needed
+      on hosting that puts idle apps to sleep. Point it at the relay's own health page.
+      Leave blank otherwise.</td></tr>
+</table>
+
+<h2>Checking it's working</h2>
+
+<p>Open <code>https://&lt;your-relay-address&gt;/api/v1/health</code> in a browser. It
+shows a page of status information: whether the webhook was picked up
+(<code>configured</code>), which features are live (<code>stage2Configured</code>,
+<code>cleanupConfigured</code>, <code>commandsConfigured</code>,
+<code>alertsConfigured</code>), how many posts are waiting for retry, and who has checked
+in recently. It's safe to look at — it never shows keys or tokens.</p>
+
+<div class="tip">
+  Looking for the technical documentation — the wire contract, limits, status codes and
+  design notes? That's <code>README.md</code> in this same folder.
+</div>
+
+</body>
+</html>

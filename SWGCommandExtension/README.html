@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Discord Chat Bridge — Player Guide (game extension)</title>
+<style>
+  body {
+    font-family: "Segoe UI", Arial, sans-serif;
+    max-width: 800px;
+    margin: 2rem auto;
+    padding: 0 1.25rem;
+    line-height: 1.6;
+    color: #222;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.7rem; border-bottom: 2px solid #2ecc71; padding-bottom: .4rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; color: #1a6e3f; }
+  code, pre {
+    font-family: Consolas, monospace;
+    background: #f0f2f0;
+    border-radius: 4px;
+  }
+  code { padding: .1rem .35rem; }
+  pre { padding: .8rem 1rem; overflow-x: auto; border: 1px solid #dfe4df; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #d5d9d5; padding: .5rem .7rem; text-align: left; vertical-align: top; }
+  th { background: #eef6ef; }
+  .tip {
+    background: #eef6ef;
+    border-left: 4px solid #2ecc71;
+    padding: .7rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .warn {
+    background: #fdf3e7;
+    border-left: 4px solid #e67e22;
+    padding: .7rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 4px 4px 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>Discord Chat Bridge — Player Guide</h1>
+
+<p>This guide is for <strong>players</strong> running the game extension
+(<code>SWGCommandExtension.dll</code>). It covers everything you can put in your
+<code>DiscordBridge.ini</code> settings file. If you are the person hosting the relay,
+see the separate guide in the <code>Relay</code> folder.</p>
+
+<p>With the bridge running:</p>
+<ul>
+  <li>Your guild chat shows up in a Discord channel.</li>
+  <li>Messages typed in that Discord channel show up in guild chat in-game.</li>
+  <li>World boss announcements from the game server are posted to Discord as
+      colour-coded alerts — green for PvE, red for PvP.</li>
+</ul>
+
+<h2>Getting started</h2>
+
+<p>Create a file called <code>DiscordBridge.ini</code> in the <strong>same folder as
+<code>SWGCommandExtension.dll</code></strong>. Only three settings are required:</p>
+
+<pre>[DiscordBridge]
+enabled=1
+endpoint=https://your-relay-address/relay
+key=paste-the-key-you-were-given-here</pre>
+
+<p>The web address and the key come from whoever runs the relay for your guild
+(the "operator"). Everything else below is optional.</p>
+
+<h2>All settings</h2>
+
+<table>
+  <tr><th>Setting</th><th>Normally</th><th>What it does</th></tr>
+  <tr>
+    <td><code>enabled</code></td><td><code>1</code></td>
+    <td><code>1</code> starts the bridge automatically when the game loads.
+        <code>0</code> keeps it off until you type <code>/emu discord on</code>.</td>
+  </tr>
+  <tr>
+    <td><code>endpoint</code></td><td>(required)</td>
+    <td>The relay's web address — the operator will tell you what it is. It should start
+        with <code>https://</code>.</td>
+  </tr>
+  <tr>
+    <td><code>key</code></td><td>(required)</td>
+    <td>The access key handed out by the operator. The bridge does nothing while this
+        is empty. Treat it like a password.</td>
+  </tr>
+  <tr>
+    <td><code>client_id</code></td><td>(blank)</td>
+    <td>How you appear in the operator's logs. Left blank, an anonymous code unique to
+        your computer is used instead — never your computer's actual name.</td>
+  </tr>
+  <tr>
+    <td><code>character</code></td><td>(blank)</td>
+    <td>Your character's name, purely as a friendly label in the operator's logs and the
+        bot's "who's online" replies. Fine to leave blank.</td>
+  </tr>
+  <tr>
+    <td><code>galaxy</code></td><td>(blank)</td>
+    <td>The server you play on — another optional label, same as above.</td>
+  </tr>
+  <tr>
+    <td><code>channel_type</code></td><td><code>9</code></td>
+    <td>The number the game uses internally for guild chat. Leave it alone unless your
+        guild chat is not being relayed — in that case type <code>/emu discord types</code>
+        in-game, find the number next to your guild lines, and put it here. Plain numbers
+        only; a typo stops the bridge with a message rather than guessing.</td>
+  </tr>
+  <tr>
+    <td><code>allow_http</code></td><td><code>0</code></td>
+    <td>A safety catch. Addresses starting <code>http://</code> (without the s) are refused
+        because your key would travel unprotected. Only set this to <code>1</code> for
+        testing on your own machine.</td>
+  </tr>
+  <tr>
+    <td><code>stage2</code></td><td><code>1</code></td>
+    <td>Whether your game helps carry messages <em>from</em> Discord into guild chat.
+        Set to <code>0</code> to opt out — your chat still goes to Discord, and Discord
+        replies still reach the guild through other members' games.</td>
+  </tr>
+  <tr>
+    <td><code>alerts</code></td><td><code>1</code></td>
+    <td>Whether your game helps relay world boss announcements. Set to <code>0</code>
+        to opt out; guild chat relaying is unaffected.</td>
+  </tr>
+  <tr>
+    <td><code>alert_channel_types</code></td><td><code>5,11</code></td>
+    <td>Which in-game message channels are watched for boss announcements (5 and 11 are
+        the system and quest message channels). Setting this <strong>replaces</strong> the
+        normal list rather than adding to it. Numbers separated by commas, up to 16 of them.</td>
+  </tr>
+  <tr>
+    <td><code>alert_tags</code></td><td><code>[PvE World Boss],[PvP World Boss]</code></td>
+    <td>The phrases that mark a line as a boss announcement. A line only counts when it
+        <strong>starts</strong> with one of these (capital letters don't matter). Setting this
+        <strong>replaces</strong> the normal list. Separate entries with commas, up to 16.</td>
+  </tr>
+</table>
+
+<div class="tip">
+  <strong>What leaves your machine:</strong> your guild chat, and — on the watched channels —
+  only lines that <em>start</em> with one of the alert phrases. Your mission updates, loot
+  messages and everything else personal on those channels never leave your computer. Because
+  a line typed by a player always arrives with their name in front, nobody can fake a boss
+  announcement by typing one.
+</div>
+
+<div class="tip">
+  <strong>If you mistype an alert setting</strong> (say, a word where a channel number should
+  be), the bridge turns the alerts feature off and tells you why in
+  <code>/emu discord status</code> — guild chat keeps working while you fix it.
+</div>
+
+<h2>Handy in-game commands</h2>
+
+<table>
+  <tr><td><code>/emu discord on</code></td><td>Turns the bridge on and re-reads the ini file, so edits apply without restarting the game.</td></tr>
+  <tr><td><code>/emu discord off</code></td><td>Turns the bridge off, both directions.</td></tr>
+  <tr><td><code>/emu discord status</code></td><td>Shows whether the bridge is running, what it has sent, and spells out anything that's wrong (a missing key, a mistyped setting, and so on).</td></tr>
+  <tr><td><code>/emu discord test</code></td><td>Sends a harmless test line so you can check the connection without saying anything in guild chat.</td></tr>
+  <tr><td><code>/emu discord poll</code></td><td>Asks the relay for waiting Discord messages right now instead of at the next scheduled check.</td></tr>
+  <tr><td><code>/emu discord types</code></td><td>Lists the chat channel numbers your game has seen — useful for checking <code>channel_type</code> and <code>alert_channel_types</code>.</td></tr>
+</table>
+
+<div class="warn">
+  <strong>Two things to be careful of:</strong>
+  <ul>
+    <li>Your <code>key</code> is like a password — don't post or share it.</li>
+    <li>Comments in the file (lines starting with <code>;</code>) must be on their own line.
+        Writing a note at the end of a setting line breaks that setting.</li>
+  </ul>
+</div>
+
+</body>
+</html>

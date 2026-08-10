@@ -87,6 +87,7 @@ public static class HealthEndpoints
                     stage2Configured = discordOptions.Value.IsStage2Configured,
                     cleanupConfigured = discordOptions.Value.IsCleanupConfigured,
                     commandsConfigured = discordOptions.Value.IsCommandsConfigured,
+                    alertsConfigured = discordOptions.Value.IsAlertsConfigured,
                     presenceOnlineWindowSeconds = relayOptions.Value.PresenceOnlineWindowSeconds
                 },
 
