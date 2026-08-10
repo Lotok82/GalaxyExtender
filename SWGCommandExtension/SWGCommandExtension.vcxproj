@@ -177,6 +177,7 @@
     <ClInclude Include="Controller.h" />
     <ClInclude Include="CreatureObject.h" />
     <ClInclude Include="CuiChatParser.h" />
+    <ClInclude Include="CuiChatRoomManager.h" />
     <ClInclude Include="CuiChatParserStrategy.h" />
     <ClInclude Include="CuiConsoleHelper.h" />
     <ClInclude Include="CuiConsoleHelperParserStrategy.h" />

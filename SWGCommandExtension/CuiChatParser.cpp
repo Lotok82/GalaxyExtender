@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "CuiChatParser.h"
+#include "CuiChatRoomManager.h"
 #include "CuiMediatorFactory.h"
 #include "SwgCuiConsole.h"
 #include "EmuCommandParser.h"
@@ -23,16 +24,25 @@ void split(const String& s, Delimiter delim, Vector& v) {
 
 
 // ============================================================================
-// Stage 2 S1/S2 send-path spike (Documentation/discord-stage2-plan.md).
+// Guild room id — two sources (Documentation/discord-stage2-plan.md).
 //
-// S1: record what (chatRoomID, useChatRoom) arrive for typed lines so a live
-// session can show how the client routes room chat — including whether plain
-// guild-tab lines reach this handler at all.
-// S2 stopgap: cache the last room-routed id so injectChat has a destination
-// before the proper s_guildRoomId static is hunted down.
+// Primary: the client's own CuiChatRoomManager::s_guildRoomId static
+// (CuiChatRoomManager.h), read once per frame by pollClientGuildRoomId. The
+// server auto-joins guild members into the guild room at login, so this is
+// non-zero from the moment the character is in the world and zero again on
+// guild leave — injection needs no typed line.
 //
-// Everything here is main-thread-only: parse and the /emu handlers all run
-// inside the typed-chat dispatch.
+// Fallback: the original S2 stopgap — cache the last room-routed id seen for
+// a TYPED line. Kept for guildless characters exercising /emu discord inject,
+// and as a safety net should the static's address ever drift in a client
+// update (the per-frame read would then report 0 or garbage-but-SEH-safe; a
+// typed line still routes). The stopgap can hold a NON-guild room (it caches
+// whatever room tab the player last typed in), which is why the client static
+// wins whenever it is non-zero.
+//
+// Everything here is main-thread-only (parse, the /emu handlers and the
+// per-frame poll all run on the game's main thread); the worker thread sees
+// only the interlocked s_roomIdCachedFlag mirror.
 // ============================================================================
 
 namespace {
@@ -53,10 +63,38 @@ uint32_t s_cachedRoomId = 0;
 unsigned long s_cachedRoomSeq = 0;
 bool s_roomIdCached = false;
 
-// Mirror of s_roomIdCached readable from the bridge's worker thread. The main
-// thread is the only writer; a plain bool read cross-thread would work on x86
-// but the interlocked mirror keeps the intent explicit.
+// Main-thread copy of the client's guild-room static, refreshed every frame.
+uint32_t s_clientGuildRoomId = 0;
+
+// Mirror of "some source has a room id" readable from the bridge's worker
+// thread. The main thread is the only writer; a plain bool read cross-thread
+// would work on x86 but the interlocked mirror keeps the intent explicit.
 volatile LONG s_roomIdCachedFlag = 0;
+
+// The id injection would use right now: client static first, typed-line
+// cache second, 0 for nothing.
+uint32_t currentRoomId() {
+	if (s_clientGuildRoomId != 0)
+		return s_clientGuildRoomId;
+
+	return s_roomIdCached ? s_cachedRoomId : 0;
+}
+
+// SEH-guarded read of the client static — its own function because MSVC
+// forbids __try in functions with C++ objects needing unwinding (same rule as
+// DiscordBridge's seh_* helpers). The address is .data in our own module's
+// process, so a fault is not expected; the guard costs nothing and turns
+// "cannot be read" into "no id" instead of a crash.
+bool seh_readGuildRoomId(uint32_t& out) {
+	__try {
+		out = *reinterpret_cast<const volatile uint32_t*>(
+			static_cast<uintptr_t>(CUICHATROOMMANAGER_GUILDROOMID_ADDRESS));
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
 
 void recordTypedLine(const soe::unicode& text, uint32_t chatRoomID, bool useChatRoom) {
 	TypedLineRecord& record = s_roomLog[s_roomLogTotal % ROOM_LOG_CAPACITY];
@@ -116,12 +154,46 @@ void CuiChatParser::appendRoomLog(soe::unicode& out) {
 	} else {
 		out += L"  cached room id: (none - no room-routed line seen yet)\n";
 	}
+
+	if (s_clientGuildRoomId != 0) {
+		char line[96];
+		sprintf_s(line, sizeof(line),
+			"  client guild room id: %u (0x%08X) - used for injection\n",
+			s_clientGuildRoomId, s_clientGuildRoomId);
+		out += line;
+	} else {
+		out += L"  client guild room id: (none - not in a guild room; "
+			L"typed-line cache is the fallback)\n";
+	}
+}
+
+void CuiChatParser::pollClientGuildRoomId() {
+	uint32_t roomId = 0;
+
+	if (!seh_readGuildRoomId(roomId))
+		roomId = 0;
+
+	s_clientGuildRoomId = roomId;
+
+	// Recomputed every frame so a guild LEAVE (static back to 0, no typed
+	// line cached) also switches the worker's polling gate off.
+	InterlockedExchange(&s_roomIdCachedFlag, currentRoomId() != 0 ? 1 : 0);
+}
+
+int CuiChatParser::cachedRoomIdSource() {
+	if (s_clientGuildRoomId != 0)
+		return 1;
+
+	return s_roomIdCached ? 2 : 0;
 }
 
 bool CuiChatParser::injectChat(const soe::unicode& text, soe::unicode& out) {
-	if (!s_roomIdCached) {
-		out += L"\\#ff4444No chat room id cached.\\#ffffff Type a line in the guild tab, "
-			L"verify with /emu discord rooms, then retry.\n";
+	uint32_t roomId = currentRoomId();
+
+	if (roomId == 0) {
+		out += L"\\#ff4444No chat room id available.\\#ffffff The client reports no guild "
+			L"room (guildless character?). Type a line in the guild tab, verify with "
+			L"/emu discord rooms, then retry.\n";
 		return false;
 	}
 
@@ -129,11 +201,11 @@ bool CuiChatParser::injectChat(const soe::unicode& text, soe::unicode& out) {
 	// itself. Deliberately not routed through our parse() so the injected line
 	// is not re-recorded here.
 	soe::unicode echo;
-	bool handled = originalParse::run(text, echo, s_cachedRoomId, true);
+	bool handled = originalParse::run(text, echo, roomId, true);
 
 	char line[128];
 	sprintf_s(line, sizeof(line), "inject: originalParse::run(room=%u (0x%08X), useChatRoom=1) returned %s\n",
-		s_cachedRoomId, s_cachedRoomId, handled ? "true" : "false");
+		roomId, roomId, handled ? "true" : "false");
 	out += line;
 
 	if (!echo.empty()) {
@@ -146,7 +218,9 @@ bool CuiChatParser::injectChat(const soe::unicode& text, soe::unicode& out) {
 }
 
 bool CuiChatParser::injectRoom(const wchar_t* text, size_t length) {
-	if (!s_roomIdCached || text == nullptr || length == 0)
+	uint32_t roomId = currentRoomId();
+
+	if (roomId == 0 || text == nullptr || length == 0)
 		return false;
 
 	// Same confirmed mechanism as injectChat, without the diagnostic output.
@@ -154,7 +228,7 @@ bool CuiChatParser::injectRoom(const wchar_t* text, size_t length) {
 	soe::unicode line(text, static_cast<uint32_t>(length));
 	soe::unicode echo;
 
-	return originalParse::run(line, echo, s_cachedRoomId, true);
+	return originalParse::run(line, echo, roomId, true);
 }
 
 bool CuiChatParser::hasCachedRoomId() {
