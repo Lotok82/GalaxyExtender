@@ -99,6 +99,12 @@ const size_t MAX_MARKED_SENDER_CHARS = 48;     // display rewrite: longest plaus
 const size_t MAX_ALERT_TAGS = 16;              // ini list cap
 const size_t MAX_ALERT_TAG_CHARS = 64;
 
+// Capped like the tags, and additionally because /emu discord status prints the
+// whole list into a fixed 512-byte line — an uncapped list would overflow it and
+// sprintf_s's invalid-parameter handler terminates the PROCESS, i.e. a config
+// file crashing the game from a status command.
+const size_t MAX_ALERT_CHANNEL_TYPES = 16;
+
 // Backstop, not a policy: a real boss alert fires a handful of times an hour, so
 // anything approaching this rate means a mis-set alert_channel_types has pointed
 // the scan at a chatty channel. The relay's rate limit is shared by the whole
@@ -136,6 +142,10 @@ struct Config {
 	std::string galaxy;
 	bool valid;
 	std::string error;      // why !valid, shown by /emu discord status
+	// Why alerts are OFF despite alerts=1: a malformed alert_* ini key. Kept apart
+	// from `error` on purpose — an alert typo must not invalidate the whole config
+	// and take guild-chat relaying down with it. Shown by /emu discord status.
+	std::string alertError;
 
 	Config()
 		: enabled(false), stage2(true), alerts(true),
@@ -1008,7 +1018,12 @@ Config loadConfigFromDisk() {
 
 	// Both lists REPLACE their defaults when set rather than adding to them, so a
 	// tag or channel can be retired and not only added.
-	if (!alertTypes.empty()) {
+	//
+	// A malformed value still fails loudly — but by switching ALERTS off and saying
+	// so in /emu discord status, never by invalidating the whole config. Alerts are
+	// the optional extra here; a typo in their keys must not take down guild-chat
+	// relaying while it gets fixed.
+	if (config.alerts && !alertTypes.empty()) {
 		std::vector<std::wstring> fields;
 		splitList(alertTypes, fields);
 
@@ -1021,16 +1036,20 @@ Config loadConfigFromDisk() {
 			long parsed = wcstol(fields[i].c_str(), &parseEnd, 10);
 
 			if (parseEnd == fields[i].c_str() || *parseEnd != L'\0' || parsed < 0) {
-				config.error = "alert_channel_types in DiscordBridge.ini must be "
+				config.alerts = false;
+				config.alertError = "alert_channel_types in DiscordBridge.ini must be "
 					"a comma-separated list of non-negative numbers";
-				return config;
+				break;
 			}
 
 			config.alertChannelTypes.push_back(static_cast<int>(parsed));
+
+			if (config.alertChannelTypes.size() >= MAX_ALERT_CHANNEL_TYPES)
+				break;   // status prints this list into a fixed buffer; cap it like the tags
 		}
 	}
 
-	if (!alertTags.empty()) {
+	if (config.alerts && !alertTags.empty()) {
 		std::vector<std::wstring> fields;
 		splitList(alertTags, fields);
 
@@ -1038,8 +1057,9 @@ Config loadConfigFromDisk() {
 
 		for (size_t i = 0; i < fields.size(); ++i) {
 			if (fields[i].size() > MAX_ALERT_TAG_CHARS) {
-				config.error = "an entry in alert_tags in DiscordBridge.ini is too long";
-				return config;
+				config.alerts = false;
+				config.alertError = "an entry in alert_tags in DiscordBridge.ini is too long";
+				break;
 			}
 
 			config.alertTags.push_back(fields[i]);
@@ -3130,7 +3150,15 @@ void DiscordBridge::appendStatus(std::string& out) {
 	// --- World boss alerts ---
 
 	if (!config.alerts) {
-		out += "  alerts: \\#ffcc00off\\#ffffff (alerts=0 in DiscordBridge.ini)\n";
+		if (!config.alertError.empty()) {
+			// A malformed alert_* key switched alerts off; the rest of the bridge
+			// keeps running. alertError is a fixed literal well under the buffer.
+			sprintf_s(line, sizeof(line), "  alerts: \\#ff4444off\\#ffffff - %s\n",
+				config.alertError.c_str());
+			out += line;
+		} else {
+			out += "  alerts: \\#ffcc00off\\#ffffff (alerts=0 in DiscordBridge.ini)\n";
+		}
 	} else {
 		std::string types;
 

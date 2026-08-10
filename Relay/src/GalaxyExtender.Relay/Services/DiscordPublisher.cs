@@ -26,6 +26,23 @@ public sealed class DiscordPublisher(
     /// <summary>Longest retry_after honoured inside the request; anything above goes to the outbox.</summary>
     private static readonly TimeSpan MaxInRequestRetry = TimeSpan.FromSeconds(2);
 
+    /// <summary>Subtext prefix for the contributing-client label on a plain message.</summary>
+    private const string ClientSuffixPrefix = "\n-# client: ";
+
+    /// <summary>Clamp for the client label — the id is self-reported and unauthenticated.</summary>
+    private const int MaxClientLabelLength = 64;
+
+    /// <summary>
+    /// Headroom the chunker must reserve below <see cref="TextSanitizer.MaxContentLength"/> for
+    /// the subtext <see cref="BuildPayload"/> appends; zero while the flag is off. Without the
+    /// reserve, a chunk built right up to 2000 goes over once the suffix lands, Discord rejects
+    /// the POST with a 400 on every retry, and the outbox eventually drops the lines.
+    /// </summary>
+    public int PlainContentReserve =>
+        options.CurrentValue.ShowContributingClient
+            ? ClientSuffixPrefix.Length + MaxClientLabelLength
+            : 0;
+
     public sealed record PublishResult(bool Success, TimeSpan? RetryAfter)
     {
         public static readonly PublishResult Ok = new(true, null);
@@ -50,9 +67,10 @@ public sealed class DiscordPublisher(
         if (current.ShowContributingClient && !string.IsNullOrEmpty(contributingClientId))
         {
             var label = TextSanitizer.ForDiscord(
-                TextSanitizer.Normalize(contributingClientId), 64, DiscordTarget.PlainMessage);
+                TextSanitizer.Normalize(contributingClientId), MaxClientLabelLength,
+                DiscordTarget.PlainMessage);
 
-            content = $"{content}\n-# client: {label}";
+            content = $"{content}{ClientSuffixPrefix}{label}";
         }
 
         return JsonSerializer.Serialize(new WebhookPayload { Content = content });

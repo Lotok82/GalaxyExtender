@@ -19,6 +19,21 @@ public sealed record AlertRule(string Tag, int Color);
 public sealed class AlertRules(IOptionsMonitor<DiscordOptions> options)
 {
     /// <summary>
+    /// Rules resolved from one options snapshot, LONGEST tag first. Cached per snapshot because
+    /// <see cref="Match"/> runs once per line and <see cref="DiscordOptions.ResolvedAlertTags"/>
+    /// builds a fresh dictionary on every read; the cache is rebuilt only when the monitor hands
+    /// out a new options instance (config reload). The benign race — two requests building the
+    /// snapshot at once — costs a duplicate allocation, never a wrong answer.
+    ///
+    /// Longest-first is a correctness rule, not a tidy-up: with overlapping tags ("[Boss]",
+    /// "[Boss Elite]") dictionary enumeration order would pick the colour nondeterministically.
+    /// The most specific tag must own the line.
+    /// </summary>
+    private sealed record Snapshot(DiscordOptions Source, AlertRule[] Rules);
+
+    private volatile Snapshot? _snapshot;
+
+    /// <summary>
     /// The rule for a line, or null when it is ordinary chat. Match on the NORMALISED text, never
     /// the display form — display escaping can put a backslash in front of the tag's opening
     /// bracket, and the tag would stop matching itself.
@@ -35,12 +50,23 @@ public sealed class AlertRules(IOptionsMonitor<DiscordOptions> options)
             return null;
         }
 
-        foreach (var (tag, color) in current.ResolvedAlertTags)
+        var snapshot = _snapshot;
+
+        if (snapshot is null || !ReferenceEquals(snapshot.Source, current))
         {
-            if (!string.IsNullOrEmpty(tag) &&
-                normalizedText.StartsWith(tag, StringComparison.OrdinalIgnoreCase))
+            snapshot = new Snapshot(current, [.. current.ResolvedAlertTags
+                .Where(pair => !string.IsNullOrEmpty(pair.Key))
+                .OrderByDescending(pair => pair.Key.Length)
+                .Select(pair => new AlertRule(pair.Key, pair.Value))]);
+
+            _snapshot = snapshot;
+        }
+
+        foreach (var rule in snapshot.Rules)
+        {
+            if (normalizedText.StartsWith(rule.Tag, StringComparison.OrdinalIgnoreCase))
             {
-                return new AlertRule(tag, color);
+                return rule;
             }
         }
 

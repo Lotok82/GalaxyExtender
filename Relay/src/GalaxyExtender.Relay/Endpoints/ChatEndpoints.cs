@@ -242,7 +242,12 @@ public static class ChatEndpoints
                 index++;
             }
 
-            var limit = color is null ? TextSanitizer.MaxContentLength : TextSanitizer.MaxDescriptionLength;
+            // Chat reserves headroom for the client subtext BuildPayload may append AFTER
+            // chunking — a chunk built exactly to 2000 would otherwise exceed the limit once
+            // the suffix lands and be rejected on every delivery attempt.
+            var limit = color is null
+                ? TextSanitizer.MaxContentLength - publisher.PlainContentReserve
+                : TextSanitizer.MaxDescriptionLength;
 
             foreach (var (text, lineCount) in TextSanitizer.BuildChunks(run, limit))
             {

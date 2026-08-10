@@ -159,10 +159,45 @@ public sealed class ForwardingTests
 
         Assert.False(document.RootElement.TryGetProperty("embeds", out _));
 
-        // Brackets are NOT escaped on this path: the game supplies the "[GuildChat] " prefix, and
-        // a plain message renders brackets literally, so escaping would publish visible backslashes.
+        // Brackets are NOT escaped on this path so the game-supplied "[GuildChat] " prefix reads
+        // cleanly. Deliberate trade-off, not a free lunch: webhook content renders masked links,
+        // so a player's [text](url) stays clickable — accepted for this private guild (see the
+        // DiscordTarget doc).
         Assert.Equal("[GuildChat] carnor: yo bud",
             document.RootElement.GetProperty("content").GetString());
+    }
+
+    /// <summary>
+    /// The client subtext is appended AFTER chunking, so the chunker must reserve headroom for
+    /// it. Without the reserve, a batch that fills a chunk right up to 2000 produces content
+    /// Discord rejects with a 400 on every delivery attempt, and the outbox eventually drops the
+    /// lines — with the flag on, this batch used to build one 1999-char chunk that overflowed.
+    /// </summary>
+    [Fact]
+    public async Task Client_subtext_never_pushes_content_past_the_limit()
+    {
+        using var app = new ConfiguredRelayTestApp(new Dictionary<string, string?>
+        {
+            ["Discord:ShowContributingClient"] = "true"
+        });
+
+        // Four distinct 499-char lines: 499*4 + 3 joiners = 1999, a whisker under the limit.
+        var texts = Enumerable.Range(0, 4).Select(i => new string((char)('a' + i), 499)).ToArray();
+
+        await app.CreateAuthenticatedClient()
+            .PostAsJsonAsync("/api/v1/chat", ChatBatches.Valid(texts));
+
+        Assert.NotEmpty(app.Discord.RequestBodies);
+
+        foreach (var body in app.Discord.RequestBodies)
+        {
+            using var document = JsonDocument.Parse(body);
+            var content = document.RootElement.GetProperty("content").GetString()!;
+
+            Assert.True(content.Length <= TextSanitizer.MaxContentLength,
+                $"content is {content.Length} chars, over Discord's {TextSanitizer.MaxContentLength} limit");
+            Assert.EndsWith("-# client: kaelen", content, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>

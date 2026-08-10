@@ -62,6 +62,10 @@
 //                             ; when it STARTS with one of these, matched
 //                             ; case-insensitively. Replaces the default.
 //
+// Both alert lists cap at 16 entries. A malformed alert_* value switches
+// ALERTS off and is reported by /emu discord status — it never invalidates the
+// whole config, so guild-chat relaying keeps working while the typo is fixed.
+//
 // Threading: everything in the hook path runs on the game's main thread and
 // must never block — clean, enqueue, return. All HTTP happens on the worker
 // thread (WinHTTP). The queue and the send state are guarded by a
