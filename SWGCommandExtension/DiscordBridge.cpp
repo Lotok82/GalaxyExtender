@@ -2963,11 +2963,13 @@ void DiscordBridge::appendStatus(std::string& out) {
 		const char* relayState = stage2Relay == 1 ? "\\#00ff00enabled\\#ffffff"
 			: stage2Relay == 0 ? "\\#ffcc00disabled\\#ffffff" : "unknown";
 
+		int roomSource = CuiChatParser::cachedRoomIdSource();
+
 		sprintf_s(line, sizeof(line), "  stage 2 (Discord -> game): on   relay: %s   room id: %s\n",
 			relayState,
-			CuiChatParser::hasCachedRoomId()
-				? "cached"
-				: "\\#ffcc00not cached - type a line in the guild tab\\#ffffff");
+			roomSource == 1 ? "from client (login auto-join)"
+			: roomSource == 2 ? "from typed line"
+			: "\\#ffcc00none - not in a guild? typing in the guild tab also works\\#ffffff");
 		out += line;
 	}
 

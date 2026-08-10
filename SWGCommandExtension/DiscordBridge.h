@@ -21,8 +21,11 @@
 // (CuiChatParser::injectRoom), paced at ~1 line/s. The injected line coming
 // back through the Stage 1 capture is the relay's delivery ack; the relay
 // never forwards marked lines to Discord, so nothing loops. Polling only
-// happens while a claim could actually be honoured: room id cached, frame
-// tick fresh (in the ground scene), and the incoming queue drained.
+// happens while a claim could actually be honoured: room id known (read each
+// frame from the client's own guild-room static, which the server's login
+// auto-join fills — see CuiChatRoomManager.h; a typed room line is the
+// fallback), frame tick fresh (in the ground scene), and the incoming queue
+// drained.
 //
 // Configuration lives in DiscordBridge.ini beside the DLL (git-ignored — it
 // holds the relay key):

@@ -52,6 +52,12 @@ bool CuiChatParser::hasCachedRoomId() {
 	return InterlockedCompareExchange(&g_hasRoom, 0, 0) != 0;
 }
 
+// The harness has no client static to read, so "has a room" maps to the
+// typed-line source (2) — appendStatus is the only caller.
+int CuiChatParser::cachedRoomIdSource() {
+	return InterlockedCompareExchange(&g_hasRoom, 0, 0) != 0 ? 2 : 0;
+}
+
 bool CuiChatParser::injectRoom(const wchar_t* text, size_t length) {
 	InjectRecord record;
 	record.text.assign(text, length);
