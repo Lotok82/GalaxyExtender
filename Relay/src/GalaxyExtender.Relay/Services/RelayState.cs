@@ -79,6 +79,15 @@ public sealed class RelayState
     /// by <see cref="RelayOptions.DeliveryNoticeIntervalMinutes"/>.
     /// </summary>
     public DateTimeOffset? LastDeliveryNoticeUtc { get; set; }
+
+    /// <summary>
+    /// When the world boss alert feed last pinged its role. Durable for the same reason as
+    /// <see cref="LastDeliveryNoticeUtc"/> and more sharply: this app pool idle-stops, so an
+    /// in-memory window would grant a fresh ping on every cold start — precisely when a quiet
+    /// spell has just ended. Advanced atomically under the store lock, so it is the claim as well
+    /// as the record. See <see cref="AlertPingThrottle"/>.
+    /// </summary>
+    public DateTimeOffset? LastAlertPingUtc { get; set; }
 }
 
 /// <summary>
@@ -164,4 +173,15 @@ public sealed class OutboxEntry
     public int Attempts { get; set; }
 
     public DateTimeOffset NotBeforeUtc { get; set; }
+
+    /// <summary>
+    /// Set when this payload carries the world boss alert role mention, to the stamp that claimed
+    /// the ping window (<see cref="RelayState.LastAlertPingUtc"/>). Null on every other entry.
+    ///
+    /// It exists so the claim can be handed back if this entry is dropped instead of delivered: a
+    /// ping nobody received must not go on costing the next alert its own. Kept as the stamp rather
+    /// than a flag so the release can check the window is still the one this entry claimed, and not
+    /// a newer ping's. See <see cref="Outbox"/>.
+    /// </summary>
+    public DateTimeOffset? AlertPingStampUtc { get; set; }
 }

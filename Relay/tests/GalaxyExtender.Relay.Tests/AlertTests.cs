@@ -259,6 +259,253 @@ public sealed class AlertTests
         Assert.Equal(1, app.Discord.RequestCount);
     }
 
+    /// <summary>
+    /// The ping. Both halves matter and neither is optional: the mention must be in `content`
+    /// because Discord renders — and never resolves — a mention written inside an embed, and the
+    /// role must be whitelisted in `allowed_mentions` because `parse: []` suppresses it otherwise.
+    /// Assert the embed is still the message, so a future "just put it in the description" edit
+    /// fails here rather than silently posting a ping-shaped string nobody is notified by.
+    /// </summary>
+    [Fact]
+    public async Task An_alert_pings_the_configured_role()
+    {
+        using var app = AppWithAlerts(("Discord:AlertRoleId", "1236350866370465793"));
+
+        await app.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[PvP World Boss] Bloodfin has spawned!")));
+
+        var payload = Single(app);
+        var mentions = payload.GetProperty("allowed_mentions");
+
+        Assert.Equal("<@&1236350866370465793>", payload.GetProperty("content").GetString());
+        Assert.Equal("1236350866370465793", mentions.GetProperty("roles")[0].GetString());
+        Assert.Equal(0, mentions.GetProperty("parse").GetArrayLength());
+        Assert.Equal(Red, payload.GetProperty("embeds")[0].GetProperty("color").GetInt32());
+    }
+
+    /// <summary>Ordinary chat keeps the hard lockdown — the whitelist is the alert path's alone.</summary>
+    [Fact]
+    public async Task Chat_never_carries_the_role_whitelist()
+    {
+        using var app = AppWithAlerts(("Discord:AlertRoleId", "1236350866370465793"));
+
+        await app.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[GuildChat] Kaelen: <@&1236350866370465793> ping me")));
+
+        var mentions = Single(app).GetProperty("allowed_mentions");
+
+        Assert.False(mentions.TryGetProperty("roles", out _));
+        Assert.Equal(0, mentions.GetProperty("parse").GetArrayLength());
+    }
+
+    /// <summary>
+    /// Unset is the default every existing deployment upgrades into, and a malformed id degrades to
+    /// the same place rather than posting "&lt;@&amp;not-an-id&gt;" as literal text on every alert.
+    ///
+    /// The last case is the one that is not merely cosmetic. Snowflakes are unsigned 64-bit, so a
+    /// digits-only value too large for one is rejected by Discord with a 400 — and a payload Discord
+    /// will never accept is not a lost ping, it is a lost ALERT: parked, retried, and finally
+    /// dropped by the outbox. It has to fail here, where failing means publishing silently.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("<@&1236350866370465793>")]
+    [InlineData("everyone")]
+    [InlineData(" 1236350866370465793 ")]
+    [InlineData("123456789012345678901234567890")]
+    public async Task An_absent_or_malformed_role_id_publishes_the_alert_without_a_ping(string? roleId)
+    {
+        using var app = AppWithAlerts(("Discord:AlertRoleId", roleId));
+
+        await app.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[PvE World Boss] a Krayt Dragon has spawned!")));
+
+        var payload = Single(app);
+
+        Assert.Equal(Green, payload.GetProperty("embeds")[0].GetProperty("color").GetInt32());
+        Assert.False(payload.TryGetProperty("content", out _));
+        Assert.False(payload.GetProperty("allowed_mentions").TryGetProperty("roles", out _));
+    }
+
+    /// <summary>
+    /// The rate limit. A boss chain, or the same broadcast repeating, must not ping the role over
+    /// and over — that is how an opt-in role becomes a muted one. Both alerts still PUBLISH: the
+    /// limit is on the ping, and suppressing the second alert would be data loss dressed up as a
+    /// noise control.
+    /// </summary>
+    [Fact]
+    public async Task A_second_alert_inside_the_window_publishes_without_pinging()
+    {
+        using var app = AppWithAlerts(("Discord:AlertRoleId", "1236350866370465793"));
+        var client = app.CreateAuthenticatedClient();
+
+        await client.PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[PvE World Boss] a Krayt Dragon has spawned!")));
+        await client.PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[PvP World Boss] Bloodfin has spawned!")));
+
+        Assert.Equal(2, app.Discord.RequestBodies.Count);
+
+        var first = JsonDocument.Parse(app.Discord.RequestBodies[0]).RootElement;
+        var second = JsonDocument.Parse(app.Discord.RequestBodies[1]).RootElement;
+
+        Assert.Equal("<@&1236350866370465793>", first.GetProperty("content").GetString());
+
+        Assert.False(second.TryGetProperty("content", out _));
+        Assert.False(second.GetProperty("allowed_mentions").TryGetProperty("roles", out _));
+        Assert.Equal(Red, second.GetProperty("embeds")[0].GetProperty("color").GetInt32());
+    }
+
+    /// <summary>
+    /// Two alerts in ONE batch is the same event shape as two batches — the claim is per alert run,
+    /// not per request, so a chain arriving together cannot buy itself two pings.
+    /// </summary>
+    [Fact]
+    public async Task Two_alerts_in_one_batch_ping_once()
+    {
+        using var app = AppWithAlerts(("Discord:AlertRoleId", "1236350866370465793"));
+
+        await app.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat", Batch("kaelen",
+            ChatBatches.Line("[PvE World Boss] a Krayt Dragon has spawned!"),
+            ChatBatches.Line("[PvP World Boss] Bloodfin has spawned!")));
+
+        var pinged = app.Discord.RequestBodies.Count(body =>
+            JsonDocument.Parse(body).RootElement.TryGetProperty("content", out var content) &&
+            content.GetString()!.Contains("1236350866370465793"));
+
+        Assert.Equal(1, pinged);
+    }
+
+    /// <summary>Once the window has passed the next alert pings again.</summary>
+    [Fact]
+    public async Task An_alert_after_the_window_pings_again()
+    {
+        using var app = AppWithAlerts(
+            ("Discord:AlertRoleId", "1236350866370465793"),
+            ("Relay:AlertPingIntervalMinutes", "0"));
+        var client = app.CreateAuthenticatedClient();
+
+        await client.PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[PvE World Boss] a Krayt Dragon has spawned!")));
+        await client.PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[PvP World Boss] Bloodfin has spawned!")));
+
+        Assert.Equal(2, app.Discord.RequestBodies.Count);
+
+        foreach (var body in app.Discord.RequestBodies)
+        {
+            Assert.Equal("<@&1236350866370465793>",
+                JsonDocument.Parse(body).RootElement.GetProperty("content").GetString());
+        }
+    }
+
+    /// <summary>
+    /// The window is claimed only by a line that is actually an alert. Chat asking for the claim
+    /// would spend the window on messages that never carry a mention, and the next real alert would
+    /// arrive silent for no reason anyone could see.
+    /// </summary>
+    [Fact]
+    public async Task Ordinary_chat_does_not_consume_the_ping_window()
+    {
+        using var app = AppWithAlerts(("Discord:AlertRoleId", "1236350866370465793"));
+        var client = app.CreateAuthenticatedClient();
+
+        await client.PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[GuildChat] Kaelen: anyone about?")));
+        await client.PostAsJsonAsync("/api/v1/chat",
+            Batch("kaelen", ChatBatches.Line("[PvP World Boss] Bloodfin has spawned!")));
+
+        var alert = JsonDocument.Parse(app.Discord.RequestBodies[1]).RootElement;
+
+        Assert.Equal("<@&1236350866370465793>", alert.GetProperty("content").GetString());
+    }
+
+    /// <summary>
+    /// The stamp is durable, which is the whole reason it lives in the state document: this app
+    /// pool idle-stops, so an in-memory window would hand a fresh ping to every cold start — and a
+    /// cold start is exactly what an alert after a quiet night arrives at.
+    /// </summary>
+    [Fact]
+    public async Task The_ping_window_survives_a_restart()
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"relay-alertping-{Guid.NewGuid():N}.json");
+
+        var config = new Dictionary<string, string?>
+        {
+            ["Discord:AlertsEnabled"] = "true",
+            ["Discord:AlertRoleId"] = "1236350866370465793",
+            ["Relay:StateFilePath"] = statePath
+        };
+
+        try
+        {
+            using (var first = new ConfiguredRelayTestApp(config))
+            {
+                await first.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat",
+                    Batch("kaelen", ChatBatches.Line("[PvE World Boss] a Krayt Dragon has spawned!")));
+
+                Assert.Equal("<@&1236350866370465793>",
+                    Single(first).GetProperty("content").GetString());
+            }
+
+            using var second = new ConfiguredRelayTestApp(config);
+
+            await second.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat",
+                Batch("tarn", ChatBatches.Line("[PvP World Boss] Bloodfin has spawned!")));
+
+            Assert.False(Single(second).TryGetProperty("content", out _));
+        }
+        finally
+        {
+            File.Delete(statePath);
+        }
+    }
+
+    /// <summary>
+    /// A stamp in the FUTURE must not silence the feed. Plain subtraction reads a negative age as
+    /// "well inside the window", so a clock correction — or a state file carried over from another
+    /// host — would suppress every ping until real time caught up, with nothing in the channel to
+    /// say why. Recovery has to be automatic, so the alert pings AND the bad stamp is replaced.
+    /// </summary>
+    [Fact]
+    public async Task A_stamp_from_the_future_does_not_silence_the_feed()
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"relay-alertskew-{Guid.NewGuid():N}.json");
+        var future = DateTimeOffset.UtcNow.AddHours(6);
+
+        await File.WriteAllTextAsync(statePath,
+            $$"""{"LastAlertPingUtc":"{{future:O}}"}""");
+
+        try
+        {
+            using var app = AppWithAlerts(
+                ("Discord:AlertRoleId", "1236350866370465793"),
+                ("Relay:StateFilePath", statePath));
+
+            // Prove the seeded stamp was actually loaded, so a rename of the state property cannot
+            // turn the assertions below into a test of nothing.
+            var seeded = await app.CreateClient().GetFromJsonAsync<JsonElement>("/api/v1/health");
+            Assert.Equal(future,
+                seeded.GetProperty("relay").GetProperty("lastAlertPingUtc").GetDateTimeOffset());
+
+            await app.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat",
+                Batch("kaelen", ChatBatches.Line("[PvP World Boss] Bloodfin has spawned!")));
+
+            Assert.Equal("<@&1236350866370465793>", Single(app).GetProperty("content").GetString());
+
+            var health = await app.CreateClient().GetFromJsonAsync<JsonElement>("/api/v1/health");
+            var stamped = health.GetProperty("relay").GetProperty("lastAlertPingUtc")
+                .GetDateTimeOffset();
+
+            Assert.True(stamped < future, "the future stamp should have been overwritten, not kept");
+        }
+        finally
+        {
+            File.Delete(statePath);
+        }
+    }
+
     [Fact]
     public async Task Health_reports_whether_the_alert_feed_is_configured()
     {

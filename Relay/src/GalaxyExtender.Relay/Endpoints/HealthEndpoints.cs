@@ -24,7 +24,7 @@ public static class HealthEndpoints
             var appData = probe.CheckAppData();
 
             var (outboxDepth, dedupeEntries, lastForwardUtc, stage2Pending, stage2Cursor, lastCleanupUtc,
-                    lastCommandScanUtc, botUserIdKnown) =
+                    lastCommandScanUtc, botUserIdKnown, lastAlertPingUtc) =
                 stateStore.Read(state => (
                     state.Outbox.Count,
                     state.Dedupe.Count,
@@ -33,7 +33,8 @@ public static class HealthEndpoints
                     state.Stage2Cursor is not null,
                     state.LastCleanupUtc,
                     state.LastCommandScanUtc,
-                    state.BotUserId is not null));
+                    state.BotUserId is not null,
+                    state.LastAlertPingUtc));
 
             var presence = presenceTracker.Snapshot();
 
@@ -88,6 +89,11 @@ public static class HealthEndpoints
                     cleanupConfigured = discordOptions.Value.IsCleanupConfigured,
                     commandsConfigured = discordOptions.Value.IsCommandsConfigured,
                     alertsConfigured = discordOptions.Value.IsAlertsConfigured,
+                    // Whether a role is set, not which — same reasoning as selfPing below: this
+                    // document is unauthenticated. Paired with relay.lastAlertPingUtc it answers
+                    // the only question an operator asks here, "why did that alert not ping?".
+                    alertRoleConfigured = discordOptions.Value.ResolvedAlertRoleId is not null,
+                    alertPingIntervalMinutes = relayOptions.Value.AlertPingIntervalMinutes,
                     presenceOnlineWindowSeconds = relayOptions.Value.PresenceOnlineWindowSeconds
                 },
 
@@ -102,7 +108,8 @@ public static class HealthEndpoints
                     stage2CursorInitialised = stage2Cursor,
                     lastCleanupUtc,
                     lastCommandScanUtc,
-                    botUserIdKnown
+                    botUserIdKnown,
+                    lastAlertPingUtc
                 },
 
                 // Is the timer that carries the outbox, the cleanup and the bot when nobody is in
