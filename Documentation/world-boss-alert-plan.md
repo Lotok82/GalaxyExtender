@@ -1,5 +1,23 @@
 # World Boss Alerts → Discord — Investigation Plan
 
+Status update, 2026-08-12: **CONFIRMED WORKING IN GAME.** Alerts reach the Discord channel as
+coloured embeds, so the channel-type assumption below (`{5, 11}`) and the no-sender-prefix
+assumption both held. Follow-up added the same day: `Discord:AlertRoleId` pings a role when an
+alert publishes. The mention has to sit in the message `content` above the embed — Discord renders
+a mention written inside an embed as text and notifies nobody — which makes the alert payload the
+only one carrying an `allowed_mentions.roles` whitelist. `parse` stays empty everywhere, so the
+guarantee that player-authored text cannot ping is unchanged; the one whitelisted id is written by
+the relay from config, never from a chat line. The ping is rate-limited to one per
+`Relay:AlertPingIntervalMinutes` (default 15) by `AlertPingThrottle`, against a durable
+`LastAlertPingUtc` claim — durable because this pool idle-stops and an in-memory window would reset
+to "ping allowed" on exactly the alerts the limit is for. The throttle governs the ping and never
+the alert: a suppressed alert still publishes as a coloured box. The claim is made at payload-build
+time, so a parked alert keeps its mention and pings late when the outbox drains; if the outbox ever
+drops that payload the window is released, since a ping nobody received must not silence the next
+alert. The role id must be a bare in-range snowflake — an out-of-range one would have Discord 400
+the payload, which loses the alert rather than merely the ping. See `Relay/README.md`, "World boss
+alerts".
+
 Status: **BUILT END TO END (steps 1–3, 2026-08-10) — NOT DEPLOYED, NOT YET SEEN IN GAME.** On branch
 `worldbossalert`: step 1 guild chat as plain text, step 2 the relay alert feed behind a default-off
 `Discord:AlertsEnabled`, step 3 the extension gate (`alerts` / `alert_channel_types` / `alert_tags`

@@ -78,6 +78,8 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Discord:EmbedColor` | `3066993` | `0x2ECC71` green. **No longer read by guild chat**, which posts as a plain message — kept as what a revert of that change would use again. |
 | `Discord:AlertsEnabled` | `false` | Operator switch for the [world boss alert feed](#world-boss-alerts) below. Off by default like the switches above. |
 | `Discord:AlertTags` | *(the two World Boss tags)* | Tag → embed colour. Setting **any** tag replaces the built-in set rather than merging with it, so a tag can be retired and not only added. Matched case-insensitively. |
+| `Discord:AlertRoleId` | — | Role snowflake pinged when an alert publishes, as a string of digits. Empty means no ping. A value that is not bare digits is ignored (no ping) rather than posted as literal text. |
+| `Relay:AlertPingIntervalMinutes` | `15` | Minimum gap between role pings. Alerts inside the window still publish, silently. `0` pings on every alert. |
 | `Discord:ShowContributingClient` | `false` | Debug embed field naming the client that won the dedupe race. |
 | `Discord:BotToken` | — | Live credential for the Stage 2 read path. Raw token, no `Bot ` prefix. |
 | `Discord:ChannelId` | — | Bridge channel snowflake, as a string of digits. |
@@ -132,7 +134,45 @@ Alerts take the embed path through the sanitizer, which means they keep the `[`/
 plain chat drops — an embed description renders `[text](url)` as a masked hyperlink. The tag itself
 therefore travels as `\[PvE World Boss\]` and Discord renders the brackets back. Do not "fix" that.
 
-`/health` reports `config.alertsConfigured`.
+**Role ping.** Set `Discord:AlertRoleId` to a role snowflake and each alert pings that role. The
+mention lands in the message `content`, so it appears as a line immediately above the coloured box —
+not inside it, and that is forced rather than chosen: Discord renders a mention written inside an
+embed as plain text and notifies nobody. The alert payload is consequently the only one that carries
+an `allowed_mentions.roles` whitelist; `parse` stays empty everywhere, so the single id the relay
+writes itself is still the only thing in any message that can ping.
+
+The id must be **bare digits within snowflake range** (they are unsigned 64-bit). Anything else — a
+`<@&…>` wrapper pasted from Discord, a typo, a number too large — is rejected here and the alert
+publishes silently, with a warning in the log naming the setting. The range half of that check is
+not fussiness: Discord rejects an out-of-range id in `allowed_mentions` with a 400, and a payload it
+will *never* accept is not a missing ping but a missing alert, retried out of the outbox and finally
+dropped.
+
+The ping is rate-limited to one per `Relay:AlertPingIntervalMinutes` (default 15), because a boss
+chain — or one broadcast repeating — is exactly how an opt-in role becomes a muted one. Four
+properties of that limit are deliberate:
+
+- **It throttles the ping, never the alert.** An alert inside the quiet window publishes as normal,
+  box and colour and all; it just notifies nobody. Dropping the alert would be data loss wearing a
+  noise control's clothes, and the second boss of a chain is the one somebody wants to read about.
+- **The window is claimed, not merely checked** — stamped atomically under the store lock before the
+  payload is built, so two alerts admitted at once cannot both win it, and a run that chunks into
+  several posts pings on the first post only.
+- **The stamp is durable state.** This app pool idle-stops, so an in-memory window would grant a
+  fresh ping on every cold start, which is to say on most alerts that arrive after a quiet spell —
+  the ones the limit exists for.
+- **A window nobody heard is given back.** The claim is made when the payload is built, so an alert
+  parked by a 429 keeps its mention and pings late when it drains — a late ping beats no ping. If
+  the outbox ever *gives up* on that payload, though, the ping reached nobody, so the window is
+  released and the next alert may notify the role. A stamp in the future (clock correction, a state
+  file from another host) counts as elapsed for the same reason: it must not silence the feed until
+  real time catches up.
+
+The window is spent only by a line that is actually an alert; chat never touches it.
+
+`/health` reports `config.alertsConfigured`, `config.alertRoleConfigured` (whether, not which — the
+document is unauthenticated), `config.alertPingIntervalMinutes` and `relay.lastAlertPingUtc`. Those
+four together answer "why did that alert not ping?" without reading the log.
 
 ### Channel-history cleanup (R10)
 

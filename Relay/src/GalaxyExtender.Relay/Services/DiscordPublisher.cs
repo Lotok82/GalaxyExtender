@@ -80,8 +80,16 @@ public sealed class DiscordPublisher(
     /// Builds an embed payload. Not used by guild chat since it moved to plain messages — this is
     /// the shape the world boss alert feed needs (its whole point is a coloured box against
     /// unboxed chat), and it keeps reverting the chat change a one-line swap at the call site.
+    ///
+    /// <paramref name="mentionRoleId"/> pings a role for the alert. Two things about it are forced
+    /// by Discord rather than chosen: the mention goes in <c>content</c>, ABOVE the box, because
+    /// mentions written inside an embed are rendered as text and never ping; and the role has to be
+    /// named in <c>allowed_mentions.roles</c>, because <c>parse: []</c> otherwise suppresses it.
+    /// That whitelist is exactly one id the relay itself supplies — <c>parse</c> stays empty, so
+    /// nothing in player-authored text gains the ability to ping anything.
     /// </summary>
-    public string BuildEmbedPayload(string description, int color, string? contributingClientId)
+    public string BuildEmbedPayload(
+        string description, int color, string? contributingClientId, string? mentionRoleId = null)
     {
         var current = options.CurrentValue;
 
@@ -94,7 +102,17 @@ public sealed class DiscordPublisher(
                 : null
         };
 
-        return JsonSerializer.Serialize(new WebhookPayload { Embeds = [embed] });
+        // Trust the caller's id no further than the option that produced it, and by the SAME rule:
+        // a non-snowflake here would post "<@&whatever>" as literal text on every alert, and an
+        // out-of-range one would have Discord reject the payload outright.
+        var roleId = DiscordOptions.IsSnowflake(mentionRoleId) ? mentionRoleId : null;
+
+        return JsonSerializer.Serialize(new WebhookPayload
+        {
+            Content = roleId is null ? null : $"<@&{roleId}>",
+            Embeds = [embed],
+            Mentions = roleId is null ? new AllowedMentions() : new AllowedMentions { Roles = [roleId] }
+        });
     }
 
     /// <summary>Sends one payload. NEVER throws — not on HTTP failure, not on cancellation —
@@ -213,6 +231,16 @@ public sealed class DiscordPublisher(
     {
         [JsonPropertyName("parse")]
         public string[] Parse { get; init; } = [];
+
+        /// <summary>
+        /// Explicit ping whitelist for the alert feed. Discord allows this alongside an empty
+        /// <see cref="Parse"/> (it rejects only the combination of "roles" in parse AND a roles
+        /// list), which is precisely the shape wanted: no mention anywhere in the message text can
+        /// ping, except the one id the relay put there itself.
+        /// </summary>
+        [JsonPropertyName("roles")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string[]? Roles { get; init; }
     }
 
     private sealed class Embed
