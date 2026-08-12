@@ -28,6 +28,7 @@ public static class ChatEndpoints
                 IOptionsMonitor<DiscordOptions> discordOptions,
                 DedupeService dedupe,
                 AlertRules alerts,
+                AlertPingThrottle alertPing,
                 DiscordPublisher publisher,
                 Outbox outbox,
                 Stage2Queue stage2Queue,
@@ -128,10 +129,10 @@ public static class ChatEndpoints
 
                 if (admission.UniqueLines.Count > 0)
                 {
-                    var chunks = BuildPayloads(admission.UniqueLines, publisher, clientId);
+                    var chunks = BuildPayloads(admission.UniqueLines, publisher, alertPing, clientId);
                     var failed = false;
 
-                    foreach (var (payload, lineCount) in chunks)
+                    foreach (var (payload, lineCount, pingStamp) in chunks)
                     {
                         if (!failed)
                         {
@@ -158,9 +159,12 @@ public static class ChatEndpoints
                             }
                         }
 
-                        // First failure parks this and every later chunk, keeping order.
+                        // First failure parks this and every later chunk, keeping order. The ping
+                        // claim travels with the payload that carries the mention: the outbox
+                        // delivers it late if it can, and hands the window back if it never can.
                         outbox.Park(payload, lineCount,
-                            retryAfterMs is { } ms ? TimeSpan.FromMilliseconds(ms) : TimeSpan.FromSeconds(10));
+                            retryAfterMs is { } ms ? TimeSpan.FromMilliseconds(ms) : TimeSpan.FromSeconds(10),
+                            pingStamp);
                         queued += lineCount;
                     }
                 }
@@ -220,13 +224,20 @@ public static class ChatEndpoints
     ///
     /// The two renderings differ in more than colour: chat is a plain message capped at Discord's
     /// 2000-character `content` limit, an alert is an embed description capped at 4096.
+    ///
+    /// NOT a pure function, despite the name: an alert run CLAIMS the ping window here, which is a
+    /// durable state write. The claim has to happen at build time because the mention is baked into
+    /// the payload text, and it is why this must be called exactly once per admitted batch —
+    /// building the same lines twice would spend the window twice. The returned stamp is that claim,
+    /// for the caller to hand to the outbox if the payload has to be parked.
     /// </summary>
-    private static List<(string Payload, int LineCount)> BuildPayloads(
+    private static List<(string Payload, int LineCount, DateTimeOffset? PingStamp)> BuildPayloads(
         IReadOnlyList<DedupeService.PreparedLine> lines,
         DiscordPublisher publisher,
+        AlertPingThrottle alertPing,
         string? clientId)
     {
-        var payloads = new List<(string, int)>();
+        var payloads = new List<(string, int, DateTimeOffset?)>();
         var index = 0;
 
         while (index < lines.Count)
@@ -249,13 +260,24 @@ public static class ChatEndpoints
                 ? TextSanitizer.MaxContentLength - publisher.PlainContentReserve
                 : TextSanitizer.MaxDescriptionLength;
 
+            // The alert role, claimed against the rate limit and then spent on the FIRST payload of
+            // the run only. A run long enough to chunk is one event as far as the guild is
+            // concerned, and a ping per chunk would train people to mute the role.
+            //
+            // Claim only for a run that is actually an alert: asking on every chat line would burn
+            // the window on messages that never carry a mention.
+            var ping = color is null ? null : alertPing.ClaimRoleMention();
+
             foreach (var (text, lineCount) in TextSanitizer.BuildChunks(run, limit))
             {
                 payloads.Add((
                     color is null
                         ? publisher.BuildPayload(text, clientId)
-                        : publisher.BuildEmbedPayload(text, color.Value, clientId),
-                    lineCount));
+                        : publisher.BuildEmbedPayload(text, color.Value, clientId, ping?.RoleId),
+                    lineCount,
+                    ping?.StampUtc));
+
+                ping = null;
             }
         }
 

@@ -169,6 +169,43 @@ online colour picker and use its decimal value (green is <code>3066993</code>, r
       than dropped — nothing is ever lost, it just isn't dressed up.</li>
 </ul>
 
+<h3>Pinging a role when an alert fires</h3>
+
+<p>Set <code>Discord__AlertRoleId</code> to the ID of the role you want notified and every
+alert box arrives with that role pinged, so anyone who wants boss alerts can join the role
+and everyone else is left alone. Leave it empty and alerts post silently, as before.</p>
+
+<pre>"Discord": {
+  "AlertsEnabled": true,
+  "AlertRoleId": "1236350866370465793"
+}</pre>
+
+<p>To find the ID: in Discord, turn on <em>Settings → Advanced → Developer Mode</em>, then
+<em>Server Settings → Roles</em>, right-click the role and choose <strong>Copy Role ID</strong>.
+Paste in the digits only. Anything else — the <code>&lt;@&amp;</code> wrapper left on, a stray
+space, a mistyped number that is too long to be an ID — is treated as a typo: the alert still
+posts in full, it just doesn't ping, and the log says so in as many words. Alerts are never
+risked to a bad ID.</p>
+
+<p>The ping appears as a short line <em>above</em> the alert box rather than inside it. That
+isn't a choice — Discord only ever notifies people from the message text, never from inside a
+coloured box. Ordinary guild chat still can't ping anyone, whatever a player types.</p>
+
+<p><strong>Nobody gets spammed.</strong> The role is pinged at most once every 15 minutes,
+however many alerts arrive in that time. Alerts that land inside the quiet window are still
+posted in full — same box, same colour — they just arrive without notifying anyone, so a run
+of bosses can't turn the role into something people mute. To change the gap, set
+<code>Relay__AlertPingIntervalMinutes</code>; <code>0</code> pings on every alert.</p>
+
+<p>If Discord is having a bad day and an alert can't be posted straight away, it waits its turn
+and the ping goes out with it when it lands — late, but better than not at all. On the rare
+occasion the relay has to give up on a message entirely, the 15-minute clock is reset, so the
+next alert can ping rather than being kept quiet on account of one nobody ever saw.</p>
+
+<p>If an alert didn't ping when you expected it to, <code>/api/v1/health</code> says why:
+<code>config.alertRoleConfigured</code> tells you whether a role is set at all, and
+<code>relay.lastAlertPingUtc</code> tells you when the last ping went out.</p>
+
 <h2>Appearance and odds &amp; ends</h2>
 
 <table>

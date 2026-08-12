@@ -79,6 +79,17 @@ public sealed class RelayOptions
     /// </summary>
     public double Stage2FetchCacheSeconds { get; set; } = 2.5;
 
+    /// <summary>
+    /// Minimum gap between world boss alert role pings (<c>Discord:AlertRoleId</c>). Alerts inside
+    /// the window still publish, just without notifying anyone — the limit is on the ping, never on
+    /// the alert.
+    ///
+    /// A real ceiling rather than a smoothing average: the failure this guards against is a boss
+    /// chain, or the same broadcast repeating, turning an opt-in role into something people mute.
+    /// <c>0</c> disables it and every alert pings.
+    /// </summary>
+    public int AlertPingIntervalMinutes { get; set; } = 15;
+
     // ------------------------------------------------------------------
     // Channel-history cleanup (R10) tunables. Config-overridable mainly
     // for tests; the code defaults are the intended behaviour.

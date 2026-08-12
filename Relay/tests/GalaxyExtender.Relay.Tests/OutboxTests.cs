@@ -16,16 +16,18 @@ public sealed class OutboxTests : IDisposable
         Path.GetTempPath(), $"relay-outbox-test-{Guid.NewGuid():N}.json");
 
     private readonly GatedHandler _handler = new();
+    private readonly IStateStore _store;
+    private readonly DiscordPublisher _publisher;
     private readonly Outbox _outbox;
 
     public OutboxTests()
     {
-        var store = new FileStateStore(
+        _store = new FileStateStore(
             environment: null!, // never dereferenced when StateFilePath is set
             Microsoft.Extensions.Options.Options.Create(new RelayOptions { StateFilePath = _path }),
             NullLogger<FileStateStore>.Instance);
 
-        var publisher = new DiscordPublisher(
+        _publisher = new DiscordPublisher(
             new SingleClientFactory(_handler),
             new StaticMonitor<DiscordOptions>(new DiscordOptions
             {
@@ -33,10 +35,12 @@ public sealed class OutboxTests : IDisposable
             }),
             NullLogger<DiscordPublisher>.Instance);
 
-        _outbox = new Outbox(store, publisher,
-            new StaticMonitor<RelayOptions>(new RelayOptions { StateFilePath = _path }),
-            NullLogger<Outbox>.Instance);
+        _outbox = OutboxWith(new RelayOptions { StateFilePath = _path });
     }
+
+    /// <summary>Another outbox over the SAME store and webhook, with its own tunables.</summary>
+    private Outbox OutboxWith(RelayOptions options) =>
+        new(_store, _publisher, new StaticMonitor<RelayOptions>(options), NullLogger<Outbox>.Instance);
 
     [Fact]
     public async Task Concurrent_drains_do_not_double_post_the_same_entry()
@@ -70,6 +74,77 @@ public sealed class OutboxTests : IDisposable
         Assert.Equal(1, _outbox.Depth);
     }
 
+    /// <summary>
+    /// An entry the outbox GIVES UP on hands back the alert ping window it was carrying.
+    ///
+    /// Claiming the window when the payload is built is right while the payload is still on its way
+    /// — a mention parked by a 429 arrives late, and a late ping beats no ping. It stops being right
+    /// the moment the entry is discarded: nobody was notified, so keeping the window spent would
+    /// silence the next alert, which is the one that still has an audience.
+    /// </summary>
+    [Fact]
+    public async Task A_dropped_entry_hands_back_the_alert_ping_window()
+    {
+        var stamp = DateTimeOffset.UtcNow;
+        Stamp(stamp);
+
+        _handler.Status = HttpStatusCode.BadRequest;
+        _handler.Release.TrySetResult();
+
+        var outbox = OutboxWith(new RelayOptions { StateFilePath = _path, OutboxMaxAttempts = 1 });
+        outbox.Park("""{"probe":1}""", 1, TimeSpan.Zero, stamp);
+        await outbox.DrainAsync(CancellationToken.None);
+
+        Assert.Equal(0, outbox.Depth);
+        Assert.Null(_store.Read(state => state.LastAlertPingUtc));
+    }
+
+    /// <summary>
+    /// ...but only the window it actually claimed. If a later alert has since pinged successfully,
+    /// that ping WAS heard and it owns the window now; releasing it would notify the role twice
+    /// inside one interval, which is the thing the throttle exists to prevent.
+    /// </summary>
+    [Fact]
+    public async Task A_dropped_entry_leaves_a_newer_ping_window_alone()
+    {
+        var newer = DateTimeOffset.UtcNow;
+        Stamp(newer);
+
+        _handler.Status = HttpStatusCode.BadRequest;
+        _handler.Release.TrySetResult();
+
+        var outbox = OutboxWith(new RelayOptions { StateFilePath = _path, OutboxMaxAttempts = 1 });
+        outbox.Park("""{"probe":1}""", 1, TimeSpan.Zero, newer.AddMinutes(-5));
+        await outbox.DrainAsync(CancellationToken.None);
+
+        Assert.Equal(0, outbox.Depth);
+        Assert.Equal(newer, _store.Read(state => state.LastAlertPingUtc));
+    }
+
+    /// <summary>
+    /// The other way an entry dies undelivered: shoved out of a full outbox by newer traffic. Same
+    /// reasoning, and easy to miss because this drop happens on the PARK path rather than the drain.
+    /// </summary>
+    [Fact]
+    public void An_entry_pushed_out_of_a_full_outbox_hands_back_its_ping_window()
+    {
+        var stamp = DateTimeOffset.UtcNow;
+        Stamp(stamp);
+
+        var outbox = OutboxWith(new RelayOptions { StateFilePath = _path, OutboxMaxEntries = 1 });
+        outbox.Park("""{"alert":1}""", 1, TimeSpan.Zero, stamp);
+        outbox.Park("""{"chat":1}""", 1, TimeSpan.Zero);
+
+        Assert.Equal(1, outbox.Depth);
+        Assert.Null(_store.Read(state => state.LastAlertPingUtc));
+    }
+
+    private void Stamp(DateTimeOffset when) => _store.Mutate<object?>(state =>
+    {
+        state.LastAlertPingUtc = when;
+        return null;
+    });
+
     public void Dispose()
     {
         try
@@ -81,11 +156,15 @@ public sealed class OutboxTests : IDisposable
         }
     }
 
-    /// <summary>204s every request; the FIRST request additionally blocks until released, so a
-    /// test can hold one drain mid-POST while another runs.</summary>
+    /// <summary>Answers every request with <see cref="Status"/> (204 by default); the FIRST request
+    /// additionally blocks until released, so a test can hold one drain mid-POST while another
+    /// runs.</summary>
     private sealed class GatedHandler : HttpMessageHandler
     {
         private int _count;
+
+        /// <summary>Set to a failure status to exercise the retry and drop paths.</summary>
+        public HttpStatusCode Status { get; set; } = HttpStatusCode.NoContent;
 
         public TaskCompletionSource FirstRequestArrived { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -104,7 +183,7 @@ public sealed class OutboxTests : IDisposable
                 await Release.Task;
             }
 
-            return new HttpResponseMessage(HttpStatusCode.NoContent);
+            return new HttpResponseMessage(Status);
         }
     }
 

@@ -31,8 +31,15 @@ public sealed class Outbox(
 
     public int Depth => store.Read(state => state.Outbox.Count);
 
-    /// <summary>Parks a payload for a later request to deliver.</summary>
-    public void Park(string payloadJson, int lineCount, TimeSpan delay)
+    /// <summary>
+    /// Parks a payload for a later request to deliver.
+    ///
+    /// <paramref name="alertPingStampUtc"/> is set only for the payload carrying the alert role
+    /// mention, and only when a ping window was actually claimed for it — see
+    /// <see cref="ReleaseAlertPingClaim"/> for what it buys.
+    /// </summary>
+    public void Park(string payloadJson, int lineCount, TimeSpan delay,
+        DateTimeOffset? alertPingStampUtc = null)
     {
         var current = options.CurrentValue;
 
@@ -42,6 +49,7 @@ public sealed class Outbox(
             {
                 // Oldest-first drop keeps the newest chat, which is what readers still care about.
                 logger.LogWarning("Outbox full ({Max}); dropping oldest entry", current.OutboxMaxEntries);
+                ReleaseAlertPingClaim(state, state.Outbox[0]);
                 state.Outbox.RemoveAt(0);
             }
 
@@ -50,11 +58,41 @@ public sealed class Outbox(
                 Payload = payloadJson,
                 LineCount = lineCount,
                 Attempts = 0,
-                NotBeforeUtc = DateTimeOffset.UtcNow + delay
+                NotBeforeUtc = DateTimeOffset.UtcNow + delay,
+                AlertPingStampUtc = alertPingStampUtc
             });
 
             return null;
         });
+    }
+
+    /// <summary>
+    /// Hands back the alert ping window claimed by an entry that is being DROPPED rather than
+    /// delivered.
+    ///
+    /// The claim is made when the payload is built, which is right while the payload is still on
+    /// its way: a mention parked by a 429 is delivered late, and a late ping beats no ping. It
+    /// stops being right the moment the entry is discarded — the ping reached nobody, and leaving
+    /// the window spent would silence the NEXT alert, which is the one that still has an audience.
+    ///
+    /// Released only if the window is still the one this entry claimed. A later alert that pinged
+    /// successfully owns the window now, and its ping was heard.
+    ///
+    /// Must be called with the entry still in <paramref name="state"/> and from inside the store
+    /// mutation that removes it, so the release and the drop are the same atomic step.
+    /// </summary>
+    private void ReleaseAlertPingClaim(RelayState state, OutboxEntry entry)
+    {
+        if (entry.AlertPingStampUtc is not { } stamp || state.LastAlertPingUtc != stamp)
+        {
+            return;
+        }
+
+        state.LastAlertPingUtc = null;
+
+        logger.LogWarning(
+            "Outbox entry {Id} carried the alert role ping and was never delivered; " +
+            "releasing the ping window so the next alert can notify the role", entry.Id);
     }
 
     /// <summary>
@@ -141,6 +179,7 @@ public sealed class Outbox(
                     logger.LogError(
                         "Outbox entry {Id} dropped after {Attempts} attempts ({Lines} line(s) lost)",
                         held.Id, held.Attempts, held.LineCount);
+                    ReleaseAlertPingClaim(state, held);
                     state.Outbox.RemoveAll(e => e.Id == held.Id);
                     return null;
                 }

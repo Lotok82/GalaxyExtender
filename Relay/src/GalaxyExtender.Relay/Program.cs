@@ -80,6 +80,7 @@ builder.Services.AddSingleton<ApiKeyValidator>();
 builder.Services.AddSingleton<IStateStore, FileStateStore>();
 builder.Services.AddSingleton<DedupeService>();
 builder.Services.AddSingleton<AlertRules>();
+builder.Services.AddSingleton<AlertPingThrottle>();
 builder.Services.AddSingleton<DiscordPublisher>();
 builder.Services.AddSingleton<Outbox>();
 
