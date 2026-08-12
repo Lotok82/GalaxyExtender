@@ -105,6 +105,40 @@ public sealed class DiscordOptions
     };
 
     /// <summary>
+    /// Role pinged when an alert publishes, as a snowflake string — snowflakes overflow JSON
+    /// readers that guess int, same as <see cref="ChannelId"/>. Empty (the default) means alerts
+    /// publish without pinging anyone, which is what every existing deployment gets on upgrade.
+    /// </summary>
+    public string? AlertRoleId { get; set; }
+
+    /// <summary>
+    /// The role id actually used, or null when unset OR not a usable snowflake.
+    ///
+    /// This is a correctness check rather than tidiness, and it bounds the VALUE and not merely the
+    /// alphabet. The mention is built by interpolating this into the message content and repeating
+    /// it in <c>allowed_mentions.roles</c>, so a value carrying anything else — a stray "&lt;@&amp;"
+    /// wrapper pasted from Discord, a typo — would either post visible junk on every alert or
+    /// smuggle arbitrary text into a field the relay authors.
+    ///
+    /// The range check is the one that matters most, because its failure is not a missing ping.
+    /// Snowflakes are unsigned 64-bit, and Discord rejects an out-of-range id in
+    /// <c>allowed_mentions</c> with a 400 — a payload it will NEVER accept, so the alert is parked,
+    /// retried and finally DROPPED by the outbox, losing the very lines the feed exists to deliver.
+    /// Rejecting the value here degrades it to "no ping" instead, which is the same as the feature
+    /// being off.
+    /// </summary>
+    public string? ResolvedAlertRoleId => IsSnowflake(AlertRoleId) ? AlertRoleId : null;
+
+    /// <summary>
+    /// True for a bare, in-range Discord snowflake. Both halves are needed:
+    /// <see cref="ulong.TryParse(string?, out ulong)"/> alone would accept " +123 " (it permits
+    /// sign and surrounding whitespace), and the digit scan alone would accept a number too large
+    /// to be a snowflake. See <see cref="ResolvedAlertRoleId"/> for why the range half matters.
+    /// </summary>
+    public static bool IsSnowflake(string? value) =>
+        !string.IsNullOrEmpty(value) && value.All(char.IsAsciiDigit) && ulong.TryParse(value, out _);
+
+    /// <summary>
     /// Add the contributing client id to the embed as a debug field. Off by default: in relay
     /// mode the relay is the author of record, and the client that happened to win the dedupe
     /// race is not meaningful to readers.
