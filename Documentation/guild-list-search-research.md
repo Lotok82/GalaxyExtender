@@ -114,12 +114,25 @@ arithmetic at runtime) and checks each object's vtable pointer first, so a
 mismatched client build degrades to an error message instead of a wild call.
 Resolved addresses are in the ARCHITECTURE.md table.
 
-`UILowerString` is reimplemented DLL-side (`UILowerString.h`): in release
-builds it is exactly two CRC-based hashes and every property dispatch compares
-hashes only. The hash→string map the client keeps for fallback paths is
-already populated for every name we use (the client's own static initializers
-register them), so generic map lookups (row `Text` on `UIData`) work too.
-Avoid names the client never constructs and dotted pseudo-properties.
+`UILowerString` is reimplemented DLL-side (`UILowerString.h`). **The shipped
+client differs from the fork source here**: the fork's `UILowerString` carries
+two hashes `{m_hashQuick, m_hashEqu}`, but the live binary's is a **single
+case-insensitive CRC-32** at offset 0 — `updateHash` (0x010E51A0) computes
+only the CRC and stores it at `[this+0]`, `get()` (0x010E5360) keys the
+hash→string map off `[this+0]`, and `operator==` is one dword compare
+(`tools/verify_uilowerstring.py`). The first in-game test shipped the fork's
+two-field layout, which made every property lookup miss silently (all
+`GetProperty` returned false → "No entry matching" for names visibly in the
+list, and no window title in the output) while everything that doesn't touch
+`UILowerString` — vtable checks, `GetChildCount` — worked. Lesson: the fork
+source is a *restoration* and can postdate the shipped binary; verify object
+layouts against the exe, not just function addresses. The CRC algorithm
+itself matches the fork instruction-for-instruction.
+
+The hash→string map the client keeps for fallback paths is already populated
+for every name we use (the client's own static initializers register them),
+so generic map lookups (row `Text` on `UIData`) work too. Avoid names the
+client never constructs and dotted pseudo-properties.
 
 ## 5. What was deliberately left out
 
