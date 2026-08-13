@@ -17,6 +17,7 @@
 #include "FoodDrinkMonitor.h"
 #include "CustomizationData.h"
 #include "DiscordBridge.h"
+#include "SuiListBoxSearch.h"
 
 static float s_originalHoverHeight = 0.0f;
 static bool s_hoverHeightStored = false;
@@ -719,6 +720,38 @@ bool EmuCommandParser::parse(const soe::vector<soe::unicode>& args,
 		}
 
 		return true;
+	} else if (command == L"find" || command == L"search") {
+		// Select & scroll to a row in the open SUI list box window (guild
+		// member list etc.). See SuiListBoxSearch.h for why this never
+		// reorders or hides rows.
+		if (args.size() < 3) {
+			resultUnicode += L"\\#88ccffUsage:\\#ffffff /emu find <text> - select & scroll to the next matching entry in the open list window (repeat to cycle).\n";
+			SuiListBoxSearch::status(resultUnicode);
+			return true;
+		}
+
+		// take everything after "find"/"search" verbatim so multi-word
+		// entries ("Add New Enemy") can be matched
+		soe::unicode text;
+		auto marker = originalCommand.find(args[1].c_str()[0] == L's' ? L"search" : L"find");
+
+		if (marker != soe::unicode::npos) {
+			auto textStart = marker + (args[1].c_str()[0] == L's' ? 6 : 4);
+
+			while (textStart < originalCommand.size() && originalCommand[textStart] == L' ')
+				++textStart;
+
+			if (textStart < originalCommand.size())
+				text = originalCommand.substr(textStart);
+		}
+
+		if (text.size() == 0) {
+			resultUnicode += L"Usage: /emu find <text>";
+		} else {
+			SuiListBoxSearch::find(text, resultUnicode);
+		}
+
+		return true;
 	} else if (command == L"help") {
 		showHelp(resultUnicode);
 
@@ -755,5 +788,6 @@ void EmuCommandParser::showHelp(soe::unicode& resultUnicode) {
 	resultUnicode += L"/emu memscan - Memory scanning tools to discover PlayerObject field offsets.\n";
 	resultUnicode += L"/emu hover [value|reset] - Get/set vehicle hover height. No args shows current, 'reset' restores default.\n";
 	resultUnicode += L"/emu discord <on|off|status|test|poll|types|rooms> - Guild chat bridge to/from Discord. Needs DiscordBridge.ini beside the DLL.\n";
+	resultUnicode += L"/emu find <text> - Select & scroll to the next matching entry in the open list window (guild members etc.). Repeat to cycle matches.\n";
 	resultUnicode += L"/emu help - This command, which lists help info on available extension commands.\n";
 }
