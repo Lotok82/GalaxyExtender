@@ -211,6 +211,23 @@ The project reimplements SOE's custom STL-like types because the client uses its
 | `0x00A2E260` | `CuiChatRoomManager::getGuildRoomId()` |
 | `0x00A2E7B0` | `CuiChatRoomManager::setGuildRoomId(uint32)` |
 | `0x01939FAC` / `0x01939FB0` | Sibling statics `s_planetRoomId` / `s_groupRoomId` (layout evidence for the hunt) |
+| | |
+| **UI vtables & property API** (hunt: `tools/find_uivtables.py` / `verify_uivtables.py`; see [guild-list-search-research.md](guild-list-search-research.md)) | |
+| `0x015F9CC4` | `UIBaseObject` vtable (29 slots). Verified slot map: 0 `IsA`, 1 `GetTypeName`, 4 `Attach`, 8/10/12 private `const char*` property stubs (return false), 9 `RemoveProperty`, **11 `SetProperty(const UILowerString&, const UIString&)`**, **13 `GetProperty(const UILowerString&, UIString&)`**, **21 `GetChildCount()`** — MSVC groups the public/private property overload pairs, so header declaration order is misleading |
+| `0x015F9DA4` | `UIPage` vtable |
+| `0x015FA0CC` | `UIWidget` vtable |
+| `0x015FA1D4` | `UIText` vtable |
+| `0x015FA6F4` | `UITextbox` vtable |
+| `0x015FAE7C` | `UIDataSource` vtable |
+| `0x015FAF9C` | `UIData` vtable (slot 13 = `UIBaseObject::GetProperty` — UIData does not override GetProperty) |
+| `0x015FB2B4` | `UIList` vtable |
+| `0x011390F0` | `UIList::SetProperty` — confirmed by its `"SelectedItem."` dotted-property prologue |
+| `0x01139460` | `UIList::GetProperty` |
+| `0x01111F50` | `UIText::GetProperty` |
+| `0x010F3BE0` | `UIBaseObject::GetProperty` (used for `UIData` list rows) |
+| `0x01131AE0` | `UIDataSource::GetChildCount` |
+| `0x010E51A0` | `UILowerString::updateHash` — **the shipped UILowerString is a single CRC-32 field at `[this+0]`**, not the fork's two-hash `{m_hashQuick, m_hashEqu}` layout (hunt: `tools/verify_uilowerstring.py`). The DLL's `UILowerString.h` mirrors the single-field layout |
+| `0x010E5360` | `UILowerString::get()` — hash→string map lookup keyed off `[this+0]` |
 
 ---
 
@@ -344,10 +361,24 @@ This pattern applies to **all workspace mediators** with `duplicateOnly=true` (e
 - Call `SetPreLocalized(true)` on each UIText widget before setting dynamic text — without this, the widget treats the string as a localization key (`@ui:string_id`) and displays nothing
 - Widget paths from the cloned page use `.` separators matching the `Name` attributes in `.inc` files: `comp.food.text` corresponds to the `comp` composite → `food` page → `text` UIText widget
 
+---
+
+## List Window Search (`/emu find`)
+
+Selects and scrolls to a matching row in the open server-created SUI list box window (guild member list, sponsored list, etc.). Implemented in `SuiListBoxSearch.cpp`; full analysis in [guild-list-search-research.md](guild-list-search-research.md). Key facts:
+
+- SUI list windows are clones of the `Script.listBox` template page, parented under the game workspace page (`/GroundHUD`), keeping the leaf name `listBox`. New clones go to the front of the child list, so `GetObjectFromPath("listBox")` from the HUD page returns the newest open window.
+- **Never reorder or hide rows client-side.** The server harvests `List.lstList`'s `SelectedRow` *index* when the window closes with Ok and maps it into its own menu-item vector — reordered/filtered rows would make Ok act on the wrong entry (e.g. kick the wrong guild member). Selecting a real row keeps the index truthful.
+- Changing `SelectedRow` programmatically sends **no network traffic**: Core3's list box subscribes only to the Ok/Cancel close events (`SuiBoxImplementation::generateHeader`), and the client's `CuiDataDrivenPageListener` is not registered on the list widget.
+- `SelectRow` never scrolls; the module computes the row's y position (`row * ScrollExtent.y / rowCount`, centered, clamped) and writes the `ScrollLocation` property. That property write bypasses `ScrollToPoint`'s clamping, hence the manual clamp. The scrollbar thumb follows automatically.
+- Row text lives on the row `UIData` as `Text`; `LocalText` exists only when localization changed the value — read `LocalText` first, fall back to `Text` (this mirrors `UIList::Render`). `UIList::GetText`/`GetLocalText` are traps (name / empty-but-true).
+- Property access uses the DLL-side `UILowerString` reimplementation (`UILowerString.h`, two CRC hashes, release layout) plus direct per-class `GetProperty`/`SetProperty` addresses, each call gated by a vtable pointer check (`isInstance`) so an unexpected client build fails gracefully instead of corrupting.
+
 ### Chat Commands
 
 | Command | Description |
 |---------|-------------|
+| `/emu find <text>` | Select & scroll to the next matching row in the open list window (alias `/emu search`; no args = diagnostics) |
 | `/emu food` | Show current food fill and percentage |
 | `/emu drink` | Show current drink fill and percentage |
 | `/emu stomach` | Show both food and drink |

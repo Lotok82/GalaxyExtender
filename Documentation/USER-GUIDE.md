@@ -105,6 +105,22 @@ If you have the modified `ui_pda_net_status.inc` installed, food and drink value
 
 ---
 
+## List Window Search
+
+### `/emu find <text>` (alias: `/emu search`)
+
+Searches the currently open server list window — the guild member list, the sponsored-members list, or any similar list dialog — and selects and scrolls to the next entry containing `<text>` (case-insensitive, spaces allowed). Repeat the command to cycle through multiple matches.
+
+- **Example**: open the guild terminal's member list, then `/emu find lierza` — the row is highlighted and scrolled into view; press Ok to act on it as usual.
+- The list is never reordered or filtered: the highlighted row is the real row the server acts on when you press Ok, so kick/title/permission operations always target exactly the highlighted member.
+- Selecting via `/emu find` sends nothing to the server — traffic only happens when you press Ok or Cancel, same as clicking a row by hand.
+
+### `/emu find`
+
+With no text, prints diagnostics: whether a list window was detected, its title, the row count, and the current selection.
+
+---
+
 ## Targeting
 
 ### `/emu assist2`
