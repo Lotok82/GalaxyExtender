@@ -324,4 +324,17 @@ void SuiListBoxSearch::status(soe::unicode& result) {
 			result += L")";
 		}
 	}
+
+	// proves the row/property read path works even before anything is selected
+	if (count > 0) {
+		UIData* first = getRow(dataSource, 0);
+		soe::unicode text;
+
+		if (first && getRowText(first, text)) {
+			result += L"\nFirst row reads as: ";
+			result += text;
+		} else {
+			result += L"\n\\#ff4444Could not read the first row's text.\\#ffffff";
+		}
+	}
 }

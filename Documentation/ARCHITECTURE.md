@@ -226,6 +226,8 @@ The project reimplements SOE's custom STL-like types because the client uses its
 | `0x01111F50` | `UIText::GetProperty` |
 | `0x010F3BE0` | `UIBaseObject::GetProperty` (used for `UIData` list rows) |
 | `0x01131AE0` | `UIDataSource::GetChildCount` |
+| `0x010E51A0` | `UILowerString::updateHash` — **the shipped UILowerString is a single CRC-32 field at `[this+0]`**, not the fork's two-hash `{m_hashQuick, m_hashEqu}` layout (hunt: `tools/verify_uilowerstring.py`). The DLL's `UILowerString.h` mirrors the single-field layout |
+| `0x010E5360` | `UILowerString::get()` — hash→string map lookup keyed off `[this+0]` |
 
 ---
 

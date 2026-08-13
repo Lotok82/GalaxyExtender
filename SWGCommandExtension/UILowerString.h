@@ -4,14 +4,17 @@
 #include <ctype.h>
 
 /*
- * DLL-side reimplementation of the client's UILowerString (fork
- * ui/src/shared/core/UILowerString.h / .cpp).
+ * DLL-side reimplementation of the client's UILowerString.
  *
- * In release builds the client object is exactly two size_t hash fields
- * (m_hashQuick, m_hashEqu) — no string storage. Every property dispatch in
- * UIBaseObject/UIWidget/UIList/UIText compares keys with operator==, which is
- * pure hash comparison, so an object built here with matching hashes is
- * indistinguishable from one built by the client.
+ * IMPORTANT — the SHIPPED client differs from the fork source
+ * (ui/src/shared/core/UILowerString.h): the fork's version carries TWO hash
+ * fields {m_hashQuick, m_hashEqu}, but the live binary's UILowerString is a
+ * SINGLE case-insensitive CRC-32 field at offset 0. Verified by disassembly
+ * (tools/verify_uilowerstring.py): updateHash (0x010E51A0) computes only the
+ * CRC and stores it at [this+0], get() (0x010E5360) keys the hash->string map
+ * off [this+0], and property compares are a single dword cmp. Shipping the
+ * fork's two-field layout made every property lookup miss silently — every
+ * GetProperty/SetProperty returned false in-game.
  *
  * The client resolves a hash back to its string (UILowerString::get) through
  * a static map populated by the client's own UILowerString constructions.
@@ -24,16 +27,11 @@
  */
 class UILowerString {
 public:
-	explicit UILowerString(const char* str) : m_hashQuick(0), m_hashEqu(0) {
-		m_hashEqu = calculateHashWithLower(str);
-
-		if (m_hashEqu)
-			m_hashQuick = calculateHashQuick(str);
+	explicit UILowerString(const char* str) : m_hashEqu(calculateHashWithLower(str)) {
 	}
 
 private:
-	// layout must match the client's release build exactly
-	uint32_t m_hashQuick;
+	// layout must match the client's release build exactly: one CRC hash
 	uint32_t m_hashEqu;
 
 	// case-insensitive CRC-32, verbatim from UILowerString.cpp
@@ -48,19 +46,6 @@ private:
 			crc = crctable()[((crc >> 24) ^ static_cast<uint32_t>(tolower(*string))) & 0xFF] ^ (crc << 8);
 
 		return crc ^ 0xFFFFFFFF;
-	}
-
-	// first four lowercased bytes packed big-endian
-	// (UILowerStringNamespace::calculateHashQuick)
-	static uint32_t calculateHashQuick(const char* str) {
-		uint32_t hash = 0;
-
-		if (str && *str) {
-			for (int cnt = static_cast<int>(sizeof(hash)) - 1; cnt >= 0 && *str; --cnt, ++str)
-				hash |= ((tolower(*str) & 0xFF) << (cnt * 8));
-		}
-
-		return hash;
 	}
 
 	static const uint32_t* crctable() {
@@ -103,4 +88,4 @@ private:
 	}
 };
 
-static_assert(sizeof(UILowerString) == 8, "UILowerString must match the client's release layout (two size_t hashes)");
+static_assert(sizeof(UILowerString) == 4, "UILowerString must match the shipped client's layout (a single CRC hash)");
