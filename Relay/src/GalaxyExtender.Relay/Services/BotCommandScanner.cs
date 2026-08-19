@@ -189,7 +189,8 @@ public sealed class BotCommandScanner(
                     presence.Snapshot(),
                     relay.PresenceOnlineWindowSeconds,
                     current.IsConfigured,
-                    current.IsStage2Configured),
+                    current.IsStage2Configured,
+                    store.Read(state => state.LastAlertUtc)),
                 BotCommands.BotCommand.Help => StatusReport.Help(),
                 _ => StatusReport.DeliveryNotice(
                     presence.Snapshot(),
