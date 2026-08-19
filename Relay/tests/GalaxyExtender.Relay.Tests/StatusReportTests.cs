@@ -90,6 +90,48 @@ public sealed class StatusReportTests
     }
 
     [Fact]
+    public void The_last_alert_age_reads_as_hours_and_minutes()
+    {
+        var text = StatusReport.Status(
+            new PresenceSnapshot(1, 1, DateTimeOffset.UtcNow), 180,
+            forwardingConfigured: true, stage2Enabled: true,
+            lastAlertUtc: DateTimeOffset.UtcNow.AddHours(-3).AddMinutes(-7));
+
+        Assert.Contains("Last World Boss Alert: 3 hours and 07 minutes ago.", text);
+    }
+
+    [Fact]
+    public void A_last_alert_older_than_a_day_keeps_counting_hours()
+    {
+        // The guild reads this line to judge whether a boss window has come round again, and that
+        // arithmetic is easier from hours than from a day rollover.
+        var text = StatusReport.Status(
+            new PresenceSnapshot(1, 1, DateTimeOffset.UtcNow), 180,
+            forwardingConfigured: true, stage2Enabled: true,
+            lastAlertUtc: DateTimeOffset.UtcNow.AddHours(-51).AddMinutes(-3));
+
+        Assert.Contains("Last World Boss Alert: 51 hours and 03 minutes ago.", text);
+    }
+
+    [Fact]
+    public void No_alert_on_record_means_no_alert_line()
+    {
+        Assert.DoesNotContain("Last World Boss Alert", Status(online: 1, known: 1));
+    }
+
+    [Fact]
+    public void A_last_alert_stamp_from_the_future_reads_as_zero_rather_than_negative()
+    {
+        // Clock skew or a state file moved between hosts can put the stamp ahead of now.
+        var text = StatusReport.Status(
+            new PresenceSnapshot(1, 1, DateTimeOffset.UtcNow), 180,
+            forwardingConfigured: true, stage2Enabled: true,
+            lastAlertUtc: DateTimeOffset.UtcNow.AddMinutes(30));
+
+        Assert.Contains("Last World Boss Alert: 0 hours and 00 minutes ago.", text);
+    }
+
+    [Fact]
     public void The_reply_always_fits_a_discord_message()
     {
         var text = Status(online: 5000, known: 5000);

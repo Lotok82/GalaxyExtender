@@ -204,6 +204,16 @@ about the bridge:
   5 clients seen recently; last seen 2 h 11 min ago.
 ```
 
+Once a world boss alert has passed through the relay, the reply also says how long ago:
+
+```
+  Last World Boss Alert: 3 hours and 07 minutes ago.
+```
+
+The stamp is written when an alert line is admitted for forwarding (post-dedupe, so the copies every
+online client sends of the same broadcast cannot re-date it) and survives restarts with the rest of
+the state document. A relay that has never seen an alert says nothing rather than "never".
+
 **Nothing here depends on what the bot is called.** A mention is matched by the bot's own user id —
 Discord puts `<@id>` on the wire, whatever name was typed — and that id is discovered from
 `GET /users/@me`, i.e. from the token. The replies name no bot and no product either: they describe

@@ -31,6 +31,7 @@ public static class ChatEndpoints
                 AlertPingThrottle alertPing,
                 DiscordPublisher publisher,
                 Outbox outbox,
+                IStateStore store,
                 Stage2Queue stage2Queue,
                 ChannelCleaner cleaner,
                 PresenceTracker presence,
@@ -129,6 +130,22 @@ public static class ChatEndpoints
 
                 if (admission.UniqueLines.Count > 0)
                 {
+                    // Stamped on admission rather than webhook success: an alert that gets parked
+                    // in the outbox still happened NOW — the stamp answers "when did the boss
+                    // broadcast?", not "when did Discord accept the POST". Post-dedupe, so the
+                    // copies every other online client sends of the same broadcast cannot keep
+                    // re-dating it.
+                    if (admission.UniqueLines.Any(line => line.Alert is not null))
+                    {
+                        var alertSeenUtc = DateTimeOffset.UtcNow;
+
+                        store.Mutate<object?>(state =>
+                        {
+                            state.LastAlertUtc = alertSeenUtc;
+                            return null;
+                        });
+                    }
+
                     var chunks = BuildPayloads(admission.UniqueLines, publisher, alertPing, clientId);
                     var failed = false;
 
