@@ -101,6 +101,58 @@ public sealed class BotCommandTests
     }
 
     [Fact]
+    public async Task Status_reports_when_the_last_world_boss_alert_was_sent()
+    {
+        using var app = CommandApp(new Dictionary<string, string?>
+        {
+            ["Discord:AlertsEnabled"] = "true"
+        });
+
+        var client = app.CreateAuthenticatedClient();
+
+        await StampCursorAsync(app, client);
+
+        // An alert passes through the relay; the age below is minutes at most, so hours read 0.
+        var chat = await client.PostAsJsonAsync("/api/v1/chat", new
+        {
+            batchId = Guid.NewGuid().ToString(),
+            client = new { id = "kaelen-pc", character = "Kaelen", galaxy = "Basilisk" },
+            lines = new[] { ChatBatches.Line("[PvP World Boss] Bloodfin has spawned!") }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, chat.StatusCode);
+
+        app.Bot.ScriptMessages(DiscordJson.Mention("200", "Bob", "status", BotUserId));
+        await HeartbeatAsync(client);
+
+        var reply = PostedReply(app);
+
+        Assert.NotNull(reply);
+        Assert.Contains("Last World Boss Alert: 0 hours and 00 minutes ago.", reply);
+    }
+
+    [Fact]
+    public async Task Status_stays_silent_about_alerts_when_none_has_ever_been_sent()
+    {
+        using var app = CommandApp(new Dictionary<string, string?>
+        {
+            ["Discord:AlertsEnabled"] = "true"
+        });
+
+        var client = app.CreateAuthenticatedClient();
+
+        await StampCursorAsync(app, client);
+
+        app.Bot.ScriptMessages(DiscordJson.Mention("200", "Bob", "status", BotUserId));
+        await HeartbeatAsync(client);
+
+        var reply = PostedReply(app);
+
+        Assert.NotNull(reply);
+        Assert.DoesNotContain("Last World Boss Alert", reply);
+    }
+
+    [Fact]
     public async Task Status_says_offline_when_nobody_has_checked_in()
     {
         // The case the command exists for: nobody is in game, so no player traffic reaches the

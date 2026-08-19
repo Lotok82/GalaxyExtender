@@ -36,7 +36,8 @@ public static class StatusReport
         PresenceSnapshot presence,
         int onlineWindowSeconds,
         bool forwardingConfigured,
-        bool stage2Enabled)
+        bool stage2Enabled,
+        DateTimeOffset? lastAlertUtc = null)
     {
         var builder = new StringBuilder();
         var window = Describe(TimeSpan.FromSeconds(onlineWindowSeconds));
@@ -74,6 +75,16 @@ public static class StatusReport
             }
 
             builder.Append('.');
+        }
+
+        // Answered only when there is a stamp to report: a relay that has never seen an alert (or
+        // whose alert feed is switched off) says nothing rather than "never", which would read as
+        // an accusation that the feed is broken.
+        if (lastAlertUtc is { } lastAlert)
+        {
+            builder.Append("\nLast World Boss Alert: ")
+                .Append(DescribeHoursAndMinutes(DateTimeOffset.UtcNow - lastAlert))
+                .Append(" ago.");
         }
 
         // The two questions that follow "is it online?" whenever a switch is off, answered before
@@ -172,6 +183,24 @@ public static class StatusReport
         "this channel; anything typed here goes back into the guild room while the bridge is on.");
 
     private static string Clients(int count) => count == 1 ? "1 client" : $"{count} clients";
+
+    /// <summary>
+    /// The alert age in the agreed shape — "x hours and xx minutes ago" — so it always parses the
+    /// same way at a glance, however long it has been. Hours grow without a day rollover (an alert
+    /// two days back reads "51 hours and 03 minutes"): the guild reads this to judge whether a boss
+    /// window has come round again, and that arithmetic is easier from hours than from days. A
+    /// future stamp (clock skew, a state file moved between hosts) clamps to zero rather than
+    /// rendering negative.
+    /// </summary>
+    private static string DescribeHoursAndMinutes(TimeSpan elapsed)
+    {
+        if (elapsed < TimeSpan.Zero)
+        {
+            elapsed = TimeSpan.Zero;
+        }
+
+        return $"{(int)elapsed.TotalHours} hours and {elapsed.Minutes:00} minutes";
+    }
 
     /// <summary>Coarse, human duration — "2 h 11 min", not "2:11:04.7".</summary>
     private static string Describe(TimeSpan elapsed)
