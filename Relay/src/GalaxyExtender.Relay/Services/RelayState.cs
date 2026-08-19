@@ -88,6 +88,17 @@ public sealed class RelayState
     /// as the record. See <see cref="AlertPingThrottle"/>.
     /// </summary>
     public DateTimeOffset? LastAlertPingUtc { get; set; }
+
+    /// <summary>
+    /// When a world boss alert last passed through the relay — stamped the moment an alert line is
+    /// admitted for forwarding, whether the webhook POST succeeds immediately or the payload is
+    /// parked in the outbox. Distinct from <see cref="LastAlertPingUtc"/> on purpose: that stamp is
+    /// the role-ping throttle CLAIM (it skips pings inside the quiet window and is handed back when
+    /// a parked ping is dropped), so it cannot answer "when was the last alert?" — an alert that
+    /// published silently, or whose ping was released, would go missing from the answer. Reported
+    /// by the bot's status reply.
+    /// </summary>
+    public DateTimeOffset? LastAlertUtc { get; set; }
 }
 
 /// <summary>
