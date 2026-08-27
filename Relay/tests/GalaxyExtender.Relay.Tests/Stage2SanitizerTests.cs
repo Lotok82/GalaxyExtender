@@ -73,9 +73,40 @@ public sealed class Stage2SanitizerTests
     public void Typographic_quotes_and_dashes_fold_to_ascii() =>
         Assert.Equal("\"it's\" - fine", Text("“it’s” — fine"));
 
+    // --- Unicode emoji (EmojiNamer) ---
+
+    [Theory]
+    [InlineData("nice \U0001F44D work", "nice :thumbsup: work")]
+    [InlineData("gg \U0001F602", "gg :joy:")]
+    [InlineData("❤️", ":heart:")]                       // VS16 form folds to the base
+    [InlineData("\U0001F44D\U0001F3FD", ":thumbsup:")]            // skin tone folds to the base
+    [InlineData("\U0001F937‍♂️", ":shrug:")]       // ZWJ gendered form folds too
+    public void Known_emoji_become_their_discord_shortcode(string content, string expected) =>
+        Assert.Equal(expected, Text(content));
+
     [Fact]
-    public void Emoji_runs_collapse_to_a_single_question_mark() =>
-        Assert.Equal("nice ? work", Text("nice \U0001F600\U0001F600\U0001F600 work"));
+    public void Identical_emoji_runs_collapse_to_a_single_name() =>
+        Assert.Equal("nice :grinning: work", Text("nice \U0001F600\U0001F600\U0001F600 work"));
+
+    [Fact]
+    public void Distinct_adjacent_emoji_are_space_separated() =>
+        Assert.Equal(":joy: :thumbsup:", Text("\U0001F602\U0001F44D"));
+
+    [Fact]
+    public void Unnamed_emoji_become_a_generic_marker() =>
+        Assert.Equal("caught one [emoji]", Text("caught one \U0001FAA4"));   // 🪤 mouse trap
+
+    [Fact]
+    public void Flag_pairs_become_a_flag_marker() =>
+        Assert.Equal("from [flag]", Text("from \U0001F1EC\U0001F1E7"));
+
+    [Fact]
+    public void Keycap_marks_drop_leaving_the_base_character() =>
+        Assert.Equal("option 1", Text("option 1️⃣"));
+
+    [Fact]
+    public void Non_emoji_unrenderable_text_still_collapses_to_a_question_mark() =>
+        Assert.Equal("said ?", Text("said 日本語"));
 
     [Fact]
     public void Zero_width_characters_vanish_without_a_trace() =>
