@@ -179,8 +179,9 @@ public static class StatusReport
     /// </summary>
     public static string Help() => Clamp(
         $"**{Subject}.** Mention me followed by `status` and I will say how many clients have the " +
-        "extension running and whether the bridge is live. Guild chat posted in game appears in " +
-        "this channel; anything typed here goes back into the guild room while the bridge is on.");
+        "extension running and whether the bridge is live; mention me with anything else and I " +
+        "will consult the magic eight ball. Guild chat posted in game appears in this channel; " +
+        "anything typed here goes back into the guild room while the bridge is on.");
 
     private static string Clients(int count) => count == 1 ? "1 client" : $"{count} clients";
 

@@ -180,9 +180,10 @@ public sealed class DiscordReader(
                     continue;
                 }
 
-                // R11: "@GalaxyExtender status" is addressed to the bot, not to the guild. The
-                // command scan answers it in Discord; injecting it into the guild room too would
-                // put half a conversation with a bot in front of players.
+                // R11: "@GalaxyExtender status" — or any mention, now that the eight ball answers
+                // the rest — is addressed to the bot, not to the guild. The command scan answers
+                // it in Discord; injecting it into the guild room too would put half a
+                // conversation with a bot in front of players.
                 if (botUserId is not null &&
                     BotCommands.Mentions(message, botUserId) &&
                     BotCommands.Parse(message.Content) != BotCommands.BotCommand.None)

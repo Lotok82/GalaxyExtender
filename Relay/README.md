@@ -228,10 +228,20 @@ reach a message the relay itself authored. Any client connected reads as online;
 offline, with how long since the last one was seen, which is the useful part of a negative answer.
 
 `status` (also `online` / `who`) reports it; `help` and a bare mention get the one-line help;
-**anything else the bot is merely named in gets no reply at all** — it shares a channel with people,
-and a bot that answers everything becomes noise. Replies quote the command and carry
-`allowed_mentions: {"parse": []}`. A command is answered in Discord and **not** injected into the
-guild room.
+**anything else the bot is named in gets a magic eight ball answer** — one of a hundred stock
+phrases, picked by hashing the message id, so the same message always maps to the same fortune and
+asking again (a new message) shakes the ball again:
+
+```
+@YourBot will the boss drop anything good tonight?
+→ Never tell me the odds. (They're not great.)
+```
+
+Replies quote the command and carry `allowed_mentions: {"parse": []}` (no eight ball phrase contains
+an `@` anyway). Every command — the eight ball included — is answered in Discord and **not** injected
+into the guild room: a mention is a conversation with the bot, and half of one has no business
+appearing in front of players. The corollary is that mentions no longer earn delivery notices — the
+eight ball answers instead, and the question was never guild-bound to begin with.
 
 ### Unprompted delivery notices
 

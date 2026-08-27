@@ -145,6 +145,8 @@ public sealed class BotCommandScanner(
                 continue;
             }
 
+            // None now means "not a mention at all": every mention parses to something, the
+            // eight ball being the fallback, so addressing the bot always gets an answer.
             var command = BotCommands.Mentions(message, botUserId)
                 ? BotCommands.Parse(message.Content)
                 : BotCommands.BotCommand.None;
@@ -192,6 +194,7 @@ public sealed class BotCommandScanner(
                     current.IsStage2Configured,
                     store.Read(state => state.LastAlertUtc)),
                 BotCommands.BotCommand.Help => StatusReport.Help(),
+                BotCommands.BotCommand.EightBall => EightBall.Reply(message.NumericId),
                 _ => StatusReport.DeliveryNotice(
                     presence.Snapshot(),
                     relay.PresenceOnlineWindowSeconds,

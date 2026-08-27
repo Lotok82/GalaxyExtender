@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using GalaxyExtender.Relay.Contracts;
+using GalaxyExtender.Relay.Services;
 
 namespace GalaxyExtender.Relay.Tests;
 
@@ -259,29 +260,32 @@ public sealed class BotCommandTests
     }
 
     [Fact]
-    public async Task A_mention_carrying_no_command_is_answered_with_silence()
+    public async Task A_mention_carrying_no_command_is_answered_by_the_eight_ball()
     {
-        // The bot shares a chat channel with people. Answering every message it is named in would
-        // make it noise nobody wants. A client is online so the delivery notice cannot fire — this
-        // is about the command path only.
+        // Any mention that is not a real command is a question for the magic eight ball, answered
+        // from the fixed pool. A client is online so the delivery notice cannot fire — this is
+        // about the command path only.
         using var app = CommandApp();
         var client = app.CreateAuthenticatedClient();
 
         await StampCursorAsync(app, client);
         await PresenceAsync(client, "kaelen-pc");
 
-        app.Bot.ScriptMessages(DiscordJson.Mention("200", "Bob", "is a good bot", BotUserId));
+        app.Bot.ScriptMessages(DiscordJson.Mention("200", "Bob", "will we win tonight?", BotUserId));
         await HeartbeatAsync(client);
 
-        Assert.Null(PostedReply(app));
+        var reply = PostedReply(app);
+
+        Assert.NotNull(reply);
+        Assert.Contains(reply, EightBall.Phrases);
     }
 
     [Fact]
-    public async Task A_mention_that_is_not_a_command_still_earns_a_delivery_notice_when_offline()
+    public async Task An_eight_ball_question_gets_a_fortune_not_a_delivery_notice_when_offline()
     {
-        // Deliberate overlap with the test above: a mention the bot does not recognise is ordinary
-        // guild-bound chat (the reader injects it), so when it cannot be delivered, the sender is
-        // told — the notice is about the message's fate, not about who it was addressed to.
+        // Before the eight ball, an unrecognised mention was ordinary guild-bound chat and earned
+        // a delivery notice when undeliverable. Now every mention is bot conversation: answered in
+        // Discord, never guild-bound, so there is no delivery to apologise for.
         using var app = CommandApp();
         var client = app.CreateAuthenticatedClient();
 
@@ -290,7 +294,38 @@ public sealed class BotCommandTests
         app.Bot.ScriptMessages(DiscordJson.Mention("200", "Bob", "is a good bot", BotUserId));
         await HeartbeatAsync(client);
 
-        Assert.Contains("waiting, not lost", PostedReply(app));
+        var reply = PostedReply(app);
+
+        Assert.NotNull(reply);
+        Assert.Contains(reply, EightBall.Phrases);
+        Assert.DoesNotContain("waiting, not lost", reply);
+    }
+
+    [Fact]
+    public async Task An_eight_ball_question_is_answered_in_discord_and_never_injected_into_the_game()
+    {
+        // Same rule as the status command: half a conversation with a bot has no business
+        // appearing in the guild room, and now every mention is such a conversation.
+        using var app = CommandApp();
+        var client = app.CreateAuthenticatedClient();
+
+        // First poll: the command scan stamps its cursor, then the Stage 2 reader stamps its own.
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+
+        var first = await client.GetAsync("/api/v1/messages?client=kaelen");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        // Second poll: the same mention reaches both paths.
+        var mention = DiscordJson.Mention("200", "Bob", "should I buy it?", BotUserId);
+        app.Bot.ScriptMessages(mention);
+        app.Bot.ScriptMessages(mention);
+
+        var second = await client.GetAsync("/api/v1/messages?client=kaelen");
+        using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+
+        Assert.Contains(PostedReply(app), EightBall.Phrases);                    // answered in Discord
+        Assert.Empty(body.RootElement.GetProperty("messages").EnumerateArray()); // not sent in game
     }
 
     [Fact]
