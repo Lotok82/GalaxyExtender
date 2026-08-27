@@ -210,7 +210,7 @@ public sealed class BotCommandScanner(
             // lost either way — spending budget on it costs nothing that was still recoverable.
             replies++;
 
-            if (!await ReplyAsync(message.Id, content))
+            if (await ReplyAsync(message.Id, content) is not { } replyId)
             {
                 continue;
             }
@@ -231,10 +231,91 @@ public sealed class BotCommandScanner(
             }
             else
             {
+                if (command == BotCommands.BotCommand.EightBall)
+                {
+                    EnqueueExchange(message, replyId, content, current, relay, now);
+                }
+
                 logger.LogInformation("Answered bot command {Command} from {Author}",
                     command, message.GlobalName ?? message.Username ?? "unknown");
             }
         }
+    }
+
+    /// <summary>Author under which the eight ball's half of an exchange is injected in game.</summary>
+    private const string EightBallAuthor = "Magic 8-Ball";
+
+    private static readonly IReadOnlyDictionary<string, string> NoMentions =
+        new Dictionary<string, string>();
+
+    /// <summary>
+    /// Queues an eight-ball exchange — the question, then its answer — for guild-room injection,
+    /// so the game sees both halves of the conversation rather than neither (the Stage 2 reader
+    /// deliberately suppresses mentions, and the bot's replies are bot-authored, so nothing else
+    /// carries them in). Only while somebody is online to receive it: with nobody in game the
+    /// exchange is answered in Discord and deliberately NOT queued for later — a fortune injected
+    /// hours after it was asked is noise, not conversation. Status and help replies stay
+    /// Discord-only on purpose: they are multi-line markdown about the bridge itself, and the
+    /// in-game equivalent is /emu discord status.
+    /// </summary>
+    private void EnqueueExchange(
+        DiscordMessage message, string replyId, string answer,
+        DiscordOptions discord, RelayOptions relay, DateTimeOffset now)
+    {
+        if (!discord.IsStage2Configured || presence.Snapshot().Online == 0)
+        {
+            return;
+        }
+
+        // The same pipeline every injected line goes through — the question keeps its mention
+        // token resolved to @BotName, so the guild room sees who was being asked; the answer's
+        // typography (em dashes and the like) folds to what the game font renders.
+        var question = Stage2Sanitizer.SanitizeText(
+            message.Content, message.MentionNames,
+            message.HasAttachments, message.HasEmbeds, message.HasStickers);
+
+        var fortune = Stage2Sanitizer.SanitizeText(answer, NoMentions, false, false, false);
+
+        if (question.Length == 0 || fortune.Length == 0)
+        {
+            return;
+        }
+
+        // The reply's real snowflake sorts the answer directly after the question in the claim
+        // order; when the POST response carried no id, one past the question's keeps that order.
+        var answerId = replyId.Length > 0 ? replyId : (message.NumericId + 1).ToString();
+
+        store.Mutate<object?>(state =>
+        {
+            state.Stage2Pending.Add(new PendingEntry
+            {
+                Id = message.Id,
+                Author = Stage2Sanitizer.SanitizeAuthor(message.GlobalName, message.Username),
+                Text = question,
+                TimestampUtc = message.TimestampUtc,
+                ReceivedUtc = now
+            });
+
+            state.Stage2Pending.Add(new PendingEntry
+            {
+                Id = answerId,
+                Author = EightBallAuthor,
+                Text = fortune,
+                TimestampUtc = now,
+                ReceivedUtc = now
+            });
+
+            // Queue cap, same rule as the reader: oldest dropped and counted.
+            while (state.Stage2Pending.Count > relay.Stage2MaxPending)
+            {
+                state.Stage2Pending.RemoveAt(0);
+                state.Stage2Dropped++;
+            }
+
+            return null;
+        });
+
+        logger.LogInformation("Eight-ball exchange queued for guild-room injection");
     }
 
     /// <summary>
@@ -360,8 +441,12 @@ public sealed class BotCommandScanner(
     /// relay authors, including a self-reported character name, can ping anyone.
     /// <c>fail_if_not_exists: false</c> keeps the reply working if the command was deleted in the
     /// meantime (or swept by the cleanup) instead of failing the POST.
+    ///
+    /// Returns the created reply's message id — the snowflake an eight-ball answer is queued
+    /// under, so it sorts directly after its question — empty when the response carried none,
+    /// and null on failure.
     /// </summary>
-    private async Task<bool> ReplyAsync(string messageId, string content)
+    private async Task<string?> ReplyAsync(string messageId, string content)
     {
         var payload = JsonSerializer.Serialize(new
         {
@@ -382,13 +467,28 @@ public sealed class BotCommandScanner(
 
         using var response = await client.SendAsync(request, CancellationToken.None);
 
-        if (response.IsSuccessStatusCode)
+        if (!response.IsSuccessStatusCode)
         {
-            return true;
+            logger.LogWarning("Bot reply failed with HTTP {Status}", (int)response.StatusCode);
+            return null;
         }
 
-        logger.LogWarning("Bot reply failed with HTTP {Status}", (int)response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync(CancellationToken.None);
 
-        return false;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                   document.RootElement.TryGetProperty("id", out var value) &&
+                   value.ValueKind == JsonValueKind.String
+                ? value.GetString() ?? string.Empty
+                : string.Empty;
+        }
+        catch (JsonException)
+        {
+            // The POST succeeded; an unreadable body only costs the reply's id.
+            return string.Empty;
+        }
     }
 }

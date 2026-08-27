@@ -238,10 +238,28 @@ asking again (a new message) shakes the ball again:
 ```
 
 Replies quote the command and carry `allowed_mentions: {"parse": []}` (no eight ball phrase contains
-an `@` anyway). Every command — the eight ball included — is answered in Discord and **not** injected
-into the guild room: a mention is a conversation with the bot, and half of one has no business
-appearing in front of players. The corollary is that mentions no longer earn delivery notices — the
-eight ball answers instead, and the question was never guild-bound to begin with.
+an `@` anyway).
+
+**Eight-ball exchanges also appear in the guild room — but only live.** While at least one client is
+online, the scan queues both halves for injection right after the reply posts, so players in game
+see the whole conversation rather than none of it:
+
+```
+[Discord] Bob: @YourBot will the boss drop anything good tonight?
+[Discord] Magic 8-Ball: Never tell me the odds. (They're not great.)
+```
+
+With nobody online the reply still posts in Discord but **nothing is queued for later** — a fortune
+injected into the guild room hours after it was asked is noise, not conversation. The injection
+path itself is the ordinary Stage 2 queue (claims, acks, TTL, the pending cap), with the answer
+queued under the reply's own message id so it always follows its question. `status` and `help`
+replies stay Discord-only on purpose: they are multi-line markdown about the bridge itself, and the
+in-game equivalent is `/emu discord status`.
+
+The raw mention and the bot's reply are still never injected directly — the reader suppresses every
+recognised command and the echo filter drops bot posts; the queued exchange above is the one road
+in. Mentions also no longer earn delivery notices: the eight ball answers instead, and the question
+was never guild-bound to begin with.
 
 ### Unprompted delivery notices
 
