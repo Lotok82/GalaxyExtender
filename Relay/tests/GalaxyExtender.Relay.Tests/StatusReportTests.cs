@@ -148,8 +148,8 @@ public sealed class StatusReportTests
     [InlineData("<@424242>", BotCommands.BotCommand.Help)]
     [InlineData("<@424242> help", BotCommands.BotCommand.Help)]
     [InlineData("<@424242> commands", BotCommands.BotCommand.Help)]
-    [InlineData("<@424242> is a good bot", BotCommands.BotCommand.None)]
-    [InlineData("<@424242> statuses are fine", BotCommands.BotCommand.None)]
+    [InlineData("<@424242> is a good bot", BotCommands.BotCommand.EightBall)]
+    [InlineData("<@424242> statuses are fine", BotCommands.BotCommand.EightBall)]
     public void Commands_are_recognised_by_word_not_by_position(string content, BotCommands.BotCommand expected) =>
         Assert.Equal(expected, BotCommands.Parse(content));
 
@@ -157,8 +157,9 @@ public sealed class StatusReportTests
     public void An_id_inside_a_mention_token_is_never_read_as_a_word()
     {
         // An emoji or channel token whose NAME happens to be a command must not trigger one: the
-        // token is stripped whole, so only what the typist actually wrote counts as words.
-        Assert.Equal(BotCommands.BotCommand.None, BotCommands.Parse("<@424242> <:status:12345> nice"));
+        // token is stripped whole, so only what the typist actually wrote counts as words — and
+        // "nice" is a question for the eight ball, not a status request.
+        Assert.Equal(BotCommands.BotCommand.EightBall, BotCommands.Parse("<@424242> <:status:12345> nice"));
     }
 
     private static DiscordMessage Message(string? content, params string[] mentionIds) =>
