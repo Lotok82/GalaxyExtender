@@ -238,8 +238,12 @@ public static class EmojiNamer
         (>= 0x2600 and <= 0x27BF) or     // misc symbols and dingbats (☀ ⚔ ✅ ❌ …)
         (>= 0x2B00 and <= 0x2BFF) or     // arrows and shapes incl. ⭐
         (>= 0x23E9 and <= 0x23FA) or     // media-control symbols (⏩ … ⏺)
+        (>= 0x2194 and <= 0x2199) or     // emoji-presentation arrows (↔ … ↙)
+        0x21A9 or 0x21AA or              // ↩ ↪
+        0x25B6 or 0x25C0 or              // ▶ ◀
         0x231A or 0x231B or              // ⌚ ⌛
         0x203C or 0x2049 or              // ‼ ⁉
+        0x2122 or 0x2139 or              // ™ ℹ
         0x2934 or 0x2935 or              // ⤴ ⤵
         0x3030 or 0x303D or              // 〰 〽
         0x3297 or 0x3299;                // ㊗ ㊙
@@ -429,6 +433,24 @@ public static class EmojiNamer
         ["\U0001F41F"] = "fish",
         ["\U0001F984"] = "unicorn",
         ["\U0001F409"] = "dragon",
+
+        // Arrows and BMP symbols with emoji presentation
+        ["™"] = "tm",
+        ["ℹ"] = "information_source",
+        ["↔"] = "left_right_arrow",
+        ["↕"] = "arrow_up_down",
+        ["↖"] = "arrow_upper_left",
+        ["↗"] = "arrow_upper_right",
+        ["↘"] = "arrow_lower_right",
+        ["↙"] = "arrow_lower_left",
+        ["↩"] = "leftwards_arrow_with_hook",
+        ["↪"] = "arrow_right_hook",
+        ["➡"] = "arrow_right",
+        ["⬅"] = "arrow_left",
+        ["⬆"] = "arrow_up",
+        ["⬇"] = "arrow_down",
+        ["▶"] = "arrow_forward",
+        ["◀"] = "arrow_backward",
 
         // Coloured circles (raid callouts and the like)
         ["\U0001F534"] = "red_circle",
