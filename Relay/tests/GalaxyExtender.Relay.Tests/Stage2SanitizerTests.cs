@@ -100,6 +100,33 @@ public sealed class Stage2SanitizerTests
     public void Flag_pairs_become_a_flag_marker() =>
         Assert.Equal("from [flag]", Text("from \U0001F1EC\U0001F1E7"));
 
+    /// <summary>
+    /// Tag-sequence flags carry their region as invisible U+E00xx runes after the 🏴 base. The
+    /// whole sequence is one cluster: the home nations get their Discord names (a UK guild types
+    /// these), and nothing may leak the tag runes into the '?' fold as phantom characters.
+    /// </summary>
+    [Fact]
+    public void Uk_subdivision_flags_get_their_discord_names() =>
+        Assert.Equal(":scotland: tonight",
+            Text("\U0001F3F4\U000E0067\U000E0062\U000E0073\U000E0063\U000E0074\U000E007F tonight"));
+
+    [Fact]
+    public void An_unnamed_tag_sequence_flag_says_flag_with_no_stray_question_mark() =>
+        Assert.Equal("[flag] raid",   // Texas: 🏴 + "ustx" tags
+            Text("\U0001F3F4\U000E0075\U000E0073\U000E0074\U000E0078\U000E007F raid"));
+
+    /// <summary>
+    /// The mixed symbol blocks contain ordinary typed text too — a ✓ or ♪ is somebody's words,
+    /// and labelling it [emoji] would misdescribe them. Those keep folding to '?'.
+    /// </summary>
+    [Fact]
+    public void Text_symbols_inside_the_emoji_blocks_still_fold_to_a_question_mark() =>
+        Assert.Equal("? cleared, ? wiped", Text("✓ cleared, ✗ wiped"));
+
+    [Fact]
+    public void Black_card_suits_are_named_emoji() =>
+        Assert.Equal(":hearts: :spades:", Text("♥♠"));
+
     [Fact]
     public void Keycap_marks_drop_leaving_the_base_character() =>
         Assert.Equal("option 1", Text("option 1️⃣"));

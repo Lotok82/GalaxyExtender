@@ -130,11 +130,13 @@ never change what appears in your channel by itself. Turn each on when you're re
     <td><code>Discord__CommandsEnabled</code></td>
     <td>The bot answers <code>@YourBot status</code> in the channel with who currently has
     the bridge running in-game — and, once a world boss alert has come through, how long ago
-    the last one was (<em>Last World Boss Alert: 3 hours and 07 minutes ago</em>). Mention it
-    with anything else and it answers as a magic eight ball, from a pool of a hundred stock
-    phrases; while somebody is playing, the question and its answer also appear in guild chat
-    (with nobody online they stay in Discord and are never delivered late). Needs the bot,
-    with <em>Send Messages</em> and <em>Read Message History</em>.</td>
+    the last one was (<em>Last World Boss Alert: 3 hours and 07 minutes ago</em>). Type
+    <code>@YourBot</code> with anything else and it answers as a magic eight ball, from a pool
+    of a hundred stock phrases; while somebody is playing, the question and its answer also
+    appear in guild chat (with nobody online the exchange stays in Discord and is never
+    delivered late). Pressing reply on one of the bot's posts doesn't count as asking — that
+    stays ordinary chat and reaches the guild room as usual. Needs the bot, with
+    <em>Send Messages</em> and <em>Read Message History</em>.</td>
   </tr>
 </table>
 
@@ -316,7 +318,9 @@ what's adjustable — change things only if you have a reason to.</p>
   <tr><td><code>PresenceMaxClients</code></td><td>200</td>
       <td>A ceiling on that list, as a safety margin.</td></tr>
   <tr><td><code>CommandScanIntervalSeconds</code></td><td>15</td>
-      <td>The shortest gap between checks for someone mentioning the bot.</td></tr>
+      <td>The shortest gap between checks for someone mentioning the bot. A mention the
+      bridge has already fetched for guild chat is answered straight away, without waiting
+      this out.</td></tr>
   <tr><td><code>CommandMaxAgeSeconds</code></td><td>300</td>
       <td>A mention older than this gets no reply — better silent than out of date.</td></tr>
   <tr><td><code>CommandMaxRepliesPerScan</code></td><td>3</td>

@@ -6,12 +6,14 @@ namespace GalaxyExtender.Relay.Services;
 /// Recognises what the bridge bot answers to when someone mentions it in the bridge channel —
 /// <c>@GalaxyExtender status</c> and friends (R11).
 ///
-/// The real commands are matched by word; every other mention is the magic eight ball
-/// (<see cref="BotCommand.EightBall"/>), a deliberate toy: mentioning the bot is a conversational
-/// act, and a stock one-liner back is friendlier than silence. That makes ANY mention bot
-/// conversation rather than guild-bound chat, which is why the Stage 2 reader suppresses every
-/// parsed command from injection, this one included. A bare mention with no words is someone
-/// asking what the bot does, so it gets the help line rather than a fortune.
+/// The real commands are matched by word; every other addressed mention is the magic eight ball
+/// (<see cref="BotCommand.EightBall"/>), a deliberate toy: addressing the bot is a conversational
+/// act, and a stock one-liner back is friendlier than silence. That makes any ADDRESSED mention
+/// (<see cref="IsAddressed"/>) bot conversation rather than guild-bound chat, which is why the
+/// Stage 2 reader suppresses it from injection — but only while it is fresh enough for the scan
+/// to still answer it; anything the scan would skip as stale flows to the guild room as ordinary
+/// chat instead of vanishing. A bare mention with no words is someone asking what the bot does,
+/// so it gets the help line rather than a fortune.
 /// </summary>
 public static class BotCommands
 {
@@ -31,22 +33,23 @@ public static class BotCommands
     }
 
     /// <summary>
-    /// True when <paramref name="message"/> addresses the bot directly: Discord's own
-    /// <c>mentions</c> array names it (which also covers a reply-with-mention), or its
-    /// <c>&lt;@id&gt;</c> / <c>&lt;@!id&gt;</c> token appears in the content. Both are checked
-    /// because the mentions array is the reliable signal but is not guaranteed to be present on
-    /// every payload shape.
+    /// True when the author deliberately addressed the bot: its <c>&lt;@id&gt;</c> /
+    /// <c>&lt;@!id&gt;</c> token appears in the message CONTENT, which is what typing or picking
+    /// <c>@bot</c> in any Discord client produces. The message's <c>mentions</c> array is
+    /// deliberately NOT consulted — Discord adds the replied-to author to it on every
+    /// default reply, so trusting it would turn each ordinary reply to a bot post into "bot
+    /// conversation": suppressed from the guild room and answered with a fortune, when the
+    /// author never addressed the bot at all.
+    ///
+    /// This is THE shared predicate for "is this message bot conversation rather than guild
+    /// chat". The Stage 2 reader (suppression) and the command scanner (answering) must both
+    /// call it, so the two paths cannot disagree about the same message.
     /// </summary>
-    public static bool Mentions(DiscordMessage message, string botUserId)
+    public static bool IsAddressed(DiscordMessage message, string botUserId)
     {
         if (string.IsNullOrEmpty(botUserId))
         {
             return false;
-        }
-
-        if (message.MentionNames.ContainsKey(botUserId))
-        {
-            return true;
         }
 
         var content = message.Content;

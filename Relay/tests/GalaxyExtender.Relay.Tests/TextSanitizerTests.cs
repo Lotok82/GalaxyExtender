@@ -97,6 +97,21 @@ public sealed class TextSanitizerTests
             "clamped text must not end with a dangling escape backslash");
     }
 
+    /// <summary>
+    /// The emoji restore runs before the clamp, so an astral pair can straddle the limit; cutting
+    /// between its surrogates would ship invalid UTF-16 that serialises as a replacement glyph.
+    /// </summary>
+    [Fact]
+    public void ForDiscord_clamp_never_splits_a_surrogate_pair()
+    {
+        // 'a' x 511 leaves exactly one UTF-16 unit of room; the restored 😂 needs two.
+        var result = TextSanitizer.ForDiscord(
+            new string('a', 511) + ":joy:", 512, DiscordTarget.PlainMessage);
+
+        Assert.True(result.Length <= 512);
+        Assert.False(char.IsHighSurrogate(result[^1]), "clamped text must not end mid-surrogate-pair");
+    }
+
     // --- emoji shortcodes (game → Discord; the reverse of Stage2Sanitizer's EmojiNamer pass) ---
 
     [Theory]
@@ -143,6 +158,8 @@ public sealed class TextSanitizerTests
     [Theory]
     [InlineData("\U0001F602", ":joy:")]          // 😂 — astral plane
     [InlineData("❤️", ":heart:")]      // ❤️ — BMP symbol with VS16
+    [InlineData("\U0001F5E1️", ":dagger:")] // 🗡️ — astral but text-presentation by default
+    [InlineData("\U0001F6E1️", ":shield:")] // 🛡️ — same; VS16 must survive the round trip
     public void Emoji_round_trip_is_exact(string emoji, string shortcode)
     {
         Assert.Equal(shortcode, EmojiNamer.Replace(emoji));

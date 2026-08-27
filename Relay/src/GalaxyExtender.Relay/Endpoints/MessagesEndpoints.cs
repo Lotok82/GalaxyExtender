@@ -50,12 +50,12 @@ public static class MessagesEndpoints
                 // is configured, and with Stage 2 off this poll is the only signal it sends.
                 presence.Touch(client!);
 
-                // Independent of Stage 2 (see BotCommandScanner) — a poll arriving while the read
-                // path is off is still a chance to hear a "status" mention.
-                await commands.ScanIfDueAsync(cancellationToken);
-
                 if (!discordOptions.CurrentValue.IsStage2Configured)
                 {
+                    // Independent of Stage 2 (see BotCommandScanner) — a poll arriving while the
+                    // read path is off is still a chance to hear a "status" mention.
+                    await commands.ScanIfDueAsync(cancellationToken);
+
                     // Contract: an unconfigured Stage 2 is the ordinary idle case, not an error —
                     // 200 + empty + "disabled", never 503, so the poll loop needs no special casing.
                     http.Response.Headers[Stage2Header] = "disabled";
@@ -70,6 +70,12 @@ public static class MessagesEndpoints
                 await cleaner.SweepIfDueAsync(cancellationToken);
 
                 await reader.FetchIfDueAsync(cancellationToken);
+
+                // AFTER the fetch, deliberately: a mention the fetch just suppressed has flagged
+                // the scanner (see DiscordReader), so scanning now answers it on this very
+                // request — and the claim below hands the eight-ball exchange to this very poll,
+                // instead of both waiting out the scan interval plus another poll cycle.
+                await commands.ScanIfDueAsync(cancellationToken);
 
                 var claimant = $"{http.Items[ApiKeyAuthenticationMiddleware.KeyLabelItem]}:{client}";
                 var response = queue.Claim(claimant);
