@@ -210,7 +210,7 @@ public sealed class BotCommandScanner(
             // lost either way — spending budget on it costs nothing that was still recoverable.
             replies++;
 
-            if (await ReplyAsync(message.Id, content) is not { } replyId)
+            if (await ReplyAsync(message.Id, content) is not { } reply)
             {
                 continue;
             }
@@ -233,7 +233,7 @@ public sealed class BotCommandScanner(
             {
                 if (command == BotCommands.BotCommand.EightBall)
                 {
-                    EnqueueExchange(message, replyId, content, current, relay, now);
+                    EnqueueExchange(message, reply, content, botUserId, current, relay, now);
                 }
 
                 logger.LogInformation("Answered bot command {Command} from {Author}",
@@ -241,9 +241,6 @@ public sealed class BotCommandScanner(
             }
         }
     }
-
-    /// <summary>Author under which the eight ball's half of an exchange is injected in game.</summary>
-    private const string EightBallAuthor = "Magic 8-Ball";
 
     private static readonly IReadOnlyDictionary<string, string> NoMentions =
         new Dictionary<string, string>();
@@ -259,7 +256,7 @@ public sealed class BotCommandScanner(
     /// in-game equivalent is /emu discord status.
     /// </summary>
     private void EnqueueExchange(
-        DiscordMessage message, string replyId, string answer,
+        DiscordMessage message, BotReply reply, string answer, string botUserId,
         DiscordOptions discord, RelayOptions relay, DateTimeOffset now)
     {
         if (!discord.IsStage2Configured || presence.Snapshot().Online == 0)
@@ -281,9 +278,16 @@ public sealed class BotCommandScanner(
             return;
         }
 
+        // The answer speaks under the bot's own name, kept rename-safe by never baking one in:
+        // Discord reports it on the reply we just posted, and the question's mention entry is
+        // the fallback when that response carried no author.
+        var botName = Stage2Sanitizer.SanitizeAuthor(
+            reply.Author.Length > 0 ? reply.Author : message.MentionNames.GetValueOrDefault(botUserId),
+            null);
+
         // The reply's real snowflake sorts the answer directly after the question in the claim
         // order; when the POST response carried no id, one past the question's keeps that order.
-        var answerId = replyId.Length > 0 ? replyId : (message.NumericId + 1).ToString();
+        var answerId = reply.Id.Length > 0 ? reply.Id : (message.NumericId + 1).ToString();
 
         store.Mutate<object?>(state =>
         {
@@ -299,7 +303,7 @@ public sealed class BotCommandScanner(
             state.Stage2Pending.Add(new PendingEntry
             {
                 Id = answerId,
-                Author = EightBallAuthor,
+                Author = botName,
                 Text = fortune,
                 TimestampUtc = now,
                 ReceivedUtc = now
@@ -436,17 +440,23 @@ public sealed class BotCommandScanner(
     }
 
     /// <summary>
+    /// What Discord reported about a reply the bot just posted: the created message's snowflake
+    /// (the id an eight-ball answer is queued under, so it sorts directly after its question) and
+    /// the bot's own display name as it stands right now (the author an eight-ball answer is
+    /// injected under). Either is empty when the response did not carry it.
+    /// </summary>
+    private sealed record BotReply(string Id, string Author);
+
+    /// <summary>
     /// Posts the answer as a reply to the command, so a busy channel makes clear what was asked.
     /// <c>allowed_mentions.parse: []</c> for the same reason the webhook carries it — nothing the
     /// relay authors, including a self-reported character name, can ping anyone.
     /// <c>fail_if_not_exists: false</c> keeps the reply working if the command was deleted in the
     /// meantime (or swept by the cleanup) instead of failing the POST.
     ///
-    /// Returns the created reply's message id — the snowflake an eight-ball answer is queued
-    /// under, so it sorts directly after its question — empty when the response carried none,
-    /// and null on failure.
+    /// Returns what Discord reported about the created reply, or null on failure.
     /// </summary>
-    private async Task<string?> ReplyAsync(string messageId, string content)
+    private async Task<BotReply?> ReplyAsync(string messageId, string content)
     {
         var payload = JsonSerializer.Serialize(new
         {
@@ -478,17 +488,33 @@ public sealed class BotCommandScanner(
         try
         {
             using var document = JsonDocument.Parse(body);
+            var root = document.RootElement;
 
-            return document.RootElement.ValueKind == JsonValueKind.Object &&
-                   document.RootElement.TryGetProperty("id", out var value) &&
-                   value.ValueKind == JsonValueKind.String
-                ? value.GetString() ?? string.Empty
-                : string.Empty;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return new BotReply(string.Empty, string.Empty);
+            }
+
+            var author = string.Empty;
+
+            if (root.TryGetProperty("author", out var authorValue) &&
+                authorValue.ValueKind == JsonValueKind.Object)
+            {
+                author = ReadString(authorValue, "global_name") ??
+                         ReadString(authorValue, "username") ?? string.Empty;
+            }
+
+            return new BotReply(ReadString(root, "id") ?? string.Empty, author);
         }
         catch (JsonException)
         {
-            // The POST succeeded; an unreadable body only costs the reply's id.
-            return string.Empty;
+            // The POST succeeded; an unreadable body only costs the reply's id and author.
+            return new BotReply(string.Empty, string.Empty);
         }
     }
+
+    private static string? ReadString(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 }

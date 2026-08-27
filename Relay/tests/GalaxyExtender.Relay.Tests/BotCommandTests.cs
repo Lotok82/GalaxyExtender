@@ -319,10 +319,13 @@ public sealed class BotCommandTests
 
         // Second poll: kaelen is online (the poll itself checks in before the scan runs), the
         // scan answers and queues the exchange, the reader suppresses the same mention, and the
-        // claim at the end of the very same poll hands both halves out — question first.
+        // claim at the end of the very same poll hands both halves out — question first. The
+        // answer speaks under the bot's CURRENT display name as Discord reports it on the posted
+        // reply, so a renamed bot answers under the new name with no config anywhere.
         var mention = DiscordJson.Mention("200", "Bob", "will we win tonight?", BotUserId);
-        app.Bot.ScriptMessages(mention);
-        app.Bot.ScriptMessages(mention);
+        app.Bot.ScriptMessages(mention);                                          // scan read
+        app.Bot.ScriptBody("{\"id\":\"250\",\"author\":{\"username\":\"ShinyBot\"}}"); // reply POST
+        app.Bot.ScriptMessages(mention);                                          // reader read
 
         var second = await client.GetAsync("/api/v1/messages?client=kaelen");
         using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
@@ -335,10 +338,40 @@ public sealed class BotCommandTests
         Assert.Equal(2, messages.Count);
         Assert.Equal("Bob", messages[0].GetProperty("author").GetString());
         Assert.Equal("@GalaxyExtender will we win tonight?", messages[0].GetProperty("text").GetString());
-        Assert.Equal("Magic 8-Ball", messages[1].GetProperty("author").GetString());
+        Assert.Equal("ShinyBot", messages[1].GetProperty("author").GetString());
+        Assert.Equal("250", messages[1].GetProperty("id").GetString());
         Assert.Equal(
             Stage2Sanitizer.SanitizeText(reply!, new Dictionary<string, string>(), false, false, false),
             messages[1].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task The_answer_falls_back_to_the_mentioned_name_when_the_post_reports_no_author()
+    {
+        // The question's own mention entry carries the bot's name too, so a reply POST whose
+        // response body could not be read still gets the exchange injected under a real name.
+        using var app = CommandApp();
+        var client = app.CreateAuthenticatedClient();
+
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+
+        var first = await client.GetAsync("/api/v1/messages?client=kaelen");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        // The reply POST is left unscripted, so it gets the fake's default empty-array body.
+        var mention = DiscordJson.Mention("200", "Bob", "roll the dice", BotUserId);
+        app.Bot.ScriptMessages(mention);
+        app.Bot.ScriptMessages(mention);
+
+        var second = await client.GetAsync("/api/v1/messages?client=kaelen");
+        using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+
+        var messages = body.RootElement.GetProperty("messages").EnumerateArray().ToList();
+
+        Assert.Equal(2, messages.Count);
+        Assert.Equal("GalaxyExtender", messages[1].GetProperty("author").GetString());
+        Assert.Equal("201", messages[1].GetProperty("id").GetString());   // question id + 1
     }
 
     [Fact]
