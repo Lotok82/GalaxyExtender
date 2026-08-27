@@ -302,10 +302,11 @@ public sealed class BotCommandTests
     }
 
     [Fact]
-    public async Task An_eight_ball_question_is_answered_in_discord_and_never_injected_into_the_game()
+    public async Task An_eight_ball_exchange_is_injected_into_the_game_while_somebody_is_online()
     {
-        // Same rule as the status command: half a conversation with a bot has no business
-        // appearing in the guild room, and now every mention is such a conversation.
+        // The guild room sees both halves of the conversation — the question (with the mention
+        // resolved to @BotName) and then the answer — queued by the scan itself, since the reader
+        // suppresses the mention and the echo filter drops the bot's reply.
         using var app = CommandApp();
         var client = app.CreateAuthenticatedClient();
 
@@ -316,16 +317,52 @@ public sealed class BotCommandTests
         var first = await client.GetAsync("/api/v1/messages?client=kaelen");
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
 
-        // Second poll: the same mention reaches both paths.
-        var mention = DiscordJson.Mention("200", "Bob", "should I buy it?", BotUserId);
+        // Second poll: kaelen is online (the poll itself checks in before the scan runs), the
+        // scan answers and queues the exchange, the reader suppresses the same mention, and the
+        // claim at the end of the very same poll hands both halves out — question first.
+        var mention = DiscordJson.Mention("200", "Bob", "will we win tonight?", BotUserId);
         app.Bot.ScriptMessages(mention);
         app.Bot.ScriptMessages(mention);
 
         var second = await client.GetAsync("/api/v1/messages?client=kaelen");
         using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
 
-        Assert.Contains(PostedReply(app), EightBall.Phrases);                    // answered in Discord
-        Assert.Empty(body.RootElement.GetProperty("messages").EnumerateArray()); // not sent in game
+        var reply = PostedReply(app);
+        Assert.Contains(reply, EightBall.Phrases);
+
+        var messages = body.RootElement.GetProperty("messages").EnumerateArray().ToList();
+
+        Assert.Equal(2, messages.Count);
+        Assert.Equal("Bob", messages[0].GetProperty("author").GetString());
+        Assert.Equal("@GalaxyExtender will we win tonight?", messages[0].GetProperty("text").GetString());
+        Assert.Equal("Magic 8-Ball", messages[1].GetProperty("author").GetString());
+        Assert.Equal(
+            Stage2Sanitizer.SanitizeText(reply!, new Dictionary<string, string>(), false, false, false),
+            messages[1].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task An_eight_ball_exchange_is_not_queued_while_nobody_is_online()
+    {
+        // Offline, the fortune still answers in Discord, but nothing is queued for later: a
+        // fortune injected into the guild room hours after it was asked is noise, not
+        // conversation. (Ordinary chat's "waiting, not lost" promise is unaffected — the
+        // exchange was never guild-bound.)
+        using var app = CommandApp();
+        var client = app.CreateAuthenticatedClient();
+
+        await StampCursorAsync(app, client);
+
+        app.Bot.ScriptMessages(DiscordJson.Mention("200", "Bob", "should I buy it?", BotUserId));
+        await HeartbeatAsync(client);
+
+        Assert.Contains(PostedReply(app), EightBall.Phrases);
+
+        // The first client to come online afterwards gets nothing: the exchange was never queued.
+        var poll = await client.GetAsync("/api/v1/messages?client=kaelen");
+        using var body = JsonDocument.Parse(await poll.Content.ReadAsStringAsync());
+
+        Assert.Empty(body.RootElement.GetProperty("messages").EnumerateArray());
     }
 
     [Fact]
