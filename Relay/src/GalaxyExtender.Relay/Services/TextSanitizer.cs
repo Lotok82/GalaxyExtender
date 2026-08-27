@@ -134,8 +134,15 @@ public static class TextSanitizer
         {
             builder.Length = maxLength;
 
+            // Never end mid-emoji: a restored shortcode is an astral pair, and cutting between
+            // the surrogates would ship invalid UTF-16 (serialised as U+FFFD at best).
+            if (builder.Length > 0 && char.IsHighSurrogate(builder[^1]))
+            {
+                builder.Length--;
+            }
+
             // Never end on the escaping backslash we just added.
-            if (builder[^1] == '\\')
+            if (builder.Length > 0 && builder[^1] == '\\')
             {
                 builder.Length--;
             }

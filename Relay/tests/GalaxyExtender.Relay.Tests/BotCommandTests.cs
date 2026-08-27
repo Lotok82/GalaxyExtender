@@ -310,7 +310,7 @@ public sealed class BotCommandTests
         using var app = CommandApp();
         var client = app.CreateAuthenticatedClient();
 
-        // First poll: the command scan stamps its cursor, then the Stage 2 reader stamps its own.
+        // First poll: the Stage 2 reader stamps its cursor, then the command scan stamps its own.
         app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
         app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
 
@@ -318,14 +318,14 @@ public sealed class BotCommandTests
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
 
         // Second poll: kaelen is online (the poll itself checks in before the scan runs), the
-        // scan answers and queues the exchange, the reader suppresses the same mention, and the
+        // reader suppresses the mention, the scan then answers and queues the exchange, and the
         // claim at the end of the very same poll hands both halves out — question first. The
         // answer speaks under the bot's CURRENT display name as Discord reports it on the posted
         // reply, so a renamed bot answers under the new name with no config anywhere.
         var mention = DiscordJson.Mention("200", "Bob", "will we win tonight?", BotUserId);
+        app.Bot.ScriptMessages(mention);                                          // reader read
         app.Bot.ScriptMessages(mention);                                          // scan read
         app.Bot.ScriptBody("{\"id\":\"250\",\"author\":{\"username\":\"ShinyBot\"}}"); // reply POST
-        app.Bot.ScriptMessages(mention);                                          // reader read
 
         var second = await client.GetAsync("/api/v1/messages?client=kaelen");
         using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
@@ -343,6 +343,83 @@ public sealed class BotCommandTests
         Assert.Equal(
             Stage2Sanitizer.SanitizeText(reply!, new Dictionary<string, string>(), false, false, false),
             messages[1].GetProperty("text").GetString());
+    }
+
+    /// <summary>
+    /// The scan interval bounds how often the bot goes LOOKING for mentions, not how long it may
+    /// sit on one already found: the reader suppresses an addressed mention from the guild room on
+    /// the promise the scan answers it, and flags the scanner so the promise is kept on this very
+    /// poll instead of waiting out the interval plus another poll cycle.
+    /// </summary>
+    [Fact]
+    public async Task A_mention_the_reader_fetched_is_answered_without_waiting_out_the_scan_interval()
+    {
+        using var app = CommandApp(new Dictionary<string, string?>
+        {
+            ["Relay:CommandScanIntervalSeconds"] = "900"
+        });
+
+        var client = app.CreateAuthenticatedClient();
+
+        // First poll: both cursors stamp; the 900 s interval starts running.
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));   // reader read
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));   // scan read
+
+        var first = await client.GetAsync("/api/v1/messages?client=kaelen");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        // Second poll, deep inside the interval: the reader fetches the mention, suppresses it
+        // and flags the scanner; the scan runs anyway, answers, and this same poll claims the
+        // whole exchange.
+        var mention = DiscordJson.Mention("200", "Bob", "will we win?", BotUserId);
+        app.Bot.ScriptMessages(mention);                                          // reader read
+        app.Bot.ScriptMessages(mention);                                          // scan read
+        app.Bot.ScriptBody("{\"id\":\"250\",\"author\":{\"username\":\"GalaxyExtender\"}}"); // reply POST
+
+        var second = await client.GetAsync("/api/v1/messages?client=kaelen");
+        using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+
+        Assert.Contains(PostedReply(app), EightBall.Phrases);
+
+        var messages = body.RootElement.GetProperty("messages").EnumerateArray().ToList();
+
+        Assert.Equal(2, messages.Count);
+        Assert.Equal("@GalaxyExtender will we win?", messages[0].GetProperty("text").GetString());
+    }
+
+    /// <summary>
+    /// The counterpart bound: ordinary chat never hurries the scan. Inside the interval a poll
+    /// costs exactly one Discord read — the reader's — and the line flows to the guild room
+    /// without the scan waking up for it.
+    /// </summary>
+    [Fact]
+    public async Task Ordinary_chat_does_not_hurry_the_scan()
+    {
+        using var app = CommandApp(new Dictionary<string, string?>
+        {
+            ["Relay:CommandScanIntervalSeconds"] = "900"
+        });
+
+        var client = app.CreateAuthenticatedClient();
+
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));   // reader read
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));   // scan read
+
+        var first = await client.GetAsync("/api/v1/messages?client=kaelen");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(2, app.Bot.RequestCount);
+
+        app.Bot.ScriptMessages(DiscordJson.User("200", "Bob", "anyone about?",
+            timestamp: DateTimeOffset.UtcNow));                            // reader read only
+
+        var second = await client.GetAsync("/api/v1/messages?client=kaelen");
+        using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+
+        Assert.Equal(3, app.Bot.RequestCount);   // no scan read, no reply POST
+        Assert.Null(PostedReply(app));
+
+        var message = Assert.Single(body.RootElement.GetProperty("messages").EnumerateArray());
+        Assert.Equal("anyone about?", message.GetProperty("text").GetString());
     }
 
     [Fact]
@@ -777,7 +854,7 @@ public sealed class BotCommandTests
         using var app = CommandApp();
         var client = app.CreateAuthenticatedClient();
 
-        // First poll: the command scan stamps its cursor, then the Stage 2 reader stamps its own.
+        // First poll: the Stage 2 reader stamps its cursor, then the command scan stamps its own.
         app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
         app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
 
@@ -848,9 +925,9 @@ public sealed class BotCommandTests
 
         var client = app.CreateAuthenticatedClient();
 
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello")); // reader cursor
         app.Bot.ScriptBody($"{{\"id\":\"{BotUserId}\"}}");                // discovery
         app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello")); // scan cursor
-        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello")); // reader cursor
 
         var first = await client.GetAsync("/api/v1/messages?client=kaelen");
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
@@ -864,6 +941,150 @@ public sealed class BotCommandTests
 
         Assert.NotNull(PostedReply(app));
         Assert.Empty(body.RootElement.GetProperty("messages").EnumerateArray());
+    }
+
+    /// <summary>
+    /// Discord adds the replied-to author to the mentions array on every default reply, with no
+    /// <c>&lt;@id&gt;</c> token in the content. That is somebody replying NEAR the bot, not
+    /// talking TO it: the line is ordinary guild-bound chat — delivered, and not answered with a
+    /// fortune.
+    /// </summary>
+    [Fact]
+    public async Task A_reply_that_pings_the_bot_without_addressing_it_is_ordinary_guild_chat()
+    {
+        using var app = CommandApp();
+        var client = app.CreateAuthenticatedClient();
+
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+
+        var first = await client.GetAsync("/api/v1/messages?client=kaelen");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        var reply = DiscordJson.User("200", "Bob", "nobody's on then, restocking tonight",
+            mentionsJson: $"[{{\"id\":\"{BotUserId}\",\"username\":\"GalaxyExtender\"}}]",
+            timestamp: DateTimeOffset.UtcNow);
+
+        app.Bot.ScriptMessages(reply);   // scan read
+        app.Bot.ScriptMessages(reply);   // reader read
+
+        var second = await client.GetAsync("/api/v1/messages?client=kaelen");
+        using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+
+        Assert.Null(PostedReply(app));
+
+        var message = Assert.Single(body.RootElement.GetProperty("messages").EnumerateArray());
+        Assert.Equal("nobody's on then, restocking tonight", message.GetProperty("text").GetString());
+    }
+
+    /// <summary>
+    /// The reader suppresses an addressed mention on the strength of the scan answering it, and
+    /// the scan skips anything older than CommandMaxAgeSeconds — so a stale mention (a backlog
+    /// after a recycle) must flow to the guild room as ordinary chat, or it would be answered by
+    /// nothing and delivered nowhere.
+    /// </summary>
+    [Fact]
+    public async Task A_stale_mention_is_injected_as_ordinary_chat_not_swallowed()
+    {
+        using var app = CommandApp();
+        var client = app.CreateAuthenticatedClient();
+
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+
+        var first = await client.GetAsync("/api/v1/messages?client=kaelen");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        var mention = DiscordJson.Mention("200", "Bob", "will we win tonight?", BotUserId,
+            timestamp: DateTimeOffset.UtcNow.AddHours(-2));
+
+        app.Bot.ScriptMessages(mention);
+        app.Bot.ScriptMessages(mention);
+
+        var second = await client.GetAsync("/api/v1/messages?client=kaelen");
+        using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+
+        Assert.Null(PostedReply(app));
+
+        var message = Assert.Single(body.RootElement.GetProperty("messages").EnumerateArray());
+        Assert.Equal("@GalaxyExtender will we win tonight?", message.GetProperty("text").GetString());
+    }
+
+    /// <summary>
+    /// Past the reply budget the bot stays silent in Discord — but the reader suppressed the
+    /// mention on this scan's behalf, so the unanswered question is still queued as ordinary
+    /// guild-bound chat rather than vanishing.
+    /// </summary>
+    [Fact]
+    public async Task An_eight_ball_question_beyond_the_reply_cap_still_reaches_the_guild_room()
+    {
+        using var app = CommandApp(new Dictionary<string, string?>
+        {
+            ["Relay:CommandMaxRepliesPerScan"] = "1"
+        });
+
+        var client = app.CreateAuthenticatedClient();
+
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+
+        var first = await client.GetAsync("/api/v1/messages?client=kaelen");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        var asked = DiscordJson.Mention("200", "Bob", "will we win?", BotUserId);
+        var capped = DiscordJson.Mention("210", "Tarn", "and me?", BotUserId);
+
+        app.Bot.ScriptMessages(asked, capped);                                    // reader read
+        app.Bot.ScriptMessages(asked, capped);                                    // scan read
+        app.Bot.ScriptBody("{\"id\":\"250\",\"author\":{\"username\":\"GalaxyExtender\"}}"); // reply POST
+
+        var second = await client.GetAsync("/api/v1/messages?client=kaelen");
+        using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+
+        // One reply posted (the cap), but BOTH questions delivered — the answered one with its
+        // fortune, the capped one as plain chat. Claim order is Discord-chronological by
+        // snowflake, and the reply (250) really was posted after both questions.
+        Assert.Equal(1, app.Bot.Requests.Count(r =>
+            r.Method == "POST" && r.Uri.EndsWith("/messages", StringComparison.Ordinal)));
+
+        var texts = body.RootElement.GetProperty("messages").EnumerateArray()
+            .Select(message => message.GetProperty("text").GetString())
+            .ToList();
+
+        Assert.Equal(3, texts.Count);
+        Assert.Equal("@GalaxyExtender will we win?", texts[0]);
+        Assert.Equal("@GalaxyExtender and me?", texts[1]);
+        Assert.Contains(texts[2], EightBall.Phrases.Select(phrase =>
+            Stage2Sanitizer.SanitizeText(phrase, new Dictionary<string, string>(), false, false, false)));
+    }
+
+    /// <summary>
+    /// A failed reply POST loses the fortune, not the question: the bot never spoke, so the
+    /// message is still ordinary guild-bound chat and is delivered as such.
+    /// </summary>
+    [Fact]
+    public async Task A_failed_reply_post_still_delivers_the_question_to_the_guild_room()
+    {
+        using var app = CommandApp();
+        var client = app.CreateAuthenticatedClient();
+
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+        app.Bot.ScriptMessages(DiscordJson.User("100", "Bob", "hello"));
+
+        var first = await client.GetAsync("/api/v1/messages?client=kaelen");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        var mention = DiscordJson.Mention("200", "Bob", "will we win tonight?", BotUserId);
+
+        app.Bot.ScriptMessages(mention);                 // reader read
+        app.Bot.ScriptMessages(mention);                 // scan read
+        app.Bot.ScriptStatus(HttpStatusCode.Forbidden);  // reply POST fails
+
+        var second = await client.GetAsync("/api/v1/messages?client=kaelen");
+        using var body = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+
+        var message = Assert.Single(body.RootElement.GetProperty("messages").EnumerateArray());
+        Assert.Equal("@GalaxyExtender will we win tonight?", message.GetProperty("text").GetString());
     }
 
     [Fact]

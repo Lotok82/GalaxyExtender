@@ -168,22 +168,24 @@ public sealed class StatusReportTests
             mentionIds.ToDictionary(id => id, _ => "GalaxyExtender"));
 
     [Fact]
-    public void A_mention_is_recognised_from_the_mentions_array()
+    public void A_reply_that_only_pings_through_the_mentions_array_is_not_addressed()
     {
-        // Covers a reply-with-mention, where the content carries no <@id> token at all.
-        Assert.True(BotCommands.Mentions(Message("status", "424242"), "424242"));
+        // Discord puts the replied-to author in the mentions array on every default reply, with
+        // no <@id> token in the content. That is somebody replying NEAR the bot, not talking TO
+        // it — treating it as addressed would eat ordinary guild-bound replies to bot posts.
+        Assert.False(BotCommands.IsAddressed(Message("nobody's on then, restocking tonight", "424242"), "424242"));
     }
 
     [Fact]
-    public void A_mention_is_recognised_from_the_content_token_alone()
+    public void A_typed_mention_is_recognised_from_the_content_token()
     {
-        Assert.True(BotCommands.Mentions(Message("<@424242> status"), "424242"));
-        Assert.True(BotCommands.Mentions(Message("<@!424242> status"), "424242"));
+        Assert.True(BotCommands.IsAddressed(Message("<@424242> status"), "424242"));
+        Assert.True(BotCommands.IsAddressed(Message("<@!424242> status"), "424242"));
     }
 
     [Fact]
     public void Somebody_elses_mention_is_not_ours()
     {
-        Assert.False(BotCommands.Mentions(Message("<@999> status", "999"), "424242"));
+        Assert.False(BotCommands.IsAddressed(Message("<@999> status", "999"), "424242"));
     }
 }

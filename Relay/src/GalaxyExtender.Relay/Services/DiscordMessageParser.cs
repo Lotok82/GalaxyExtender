@@ -140,7 +140,11 @@ public static class DiscordMessageParser
         return mentionNames;
     }
 
-    private static string? ReadString(JsonElement element, string property) =>
+    /// <summary>
+    /// String property or null. Shared with <see cref="BotCommandScanner"/> (reply-author and
+    /// bot-identity reads) so every Discord payload field is read with the same tolerance.
+    /// </summary>
+    internal static string? ReadString(JsonElement element, string property) =>
         element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;

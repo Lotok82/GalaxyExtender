@@ -196,6 +196,14 @@ public static class EmojiNamer
             return $":{name}:";
         }
 
+        // A tag sequence (base + U+E0020..E007F spelling out a region) is a flag by construction
+        // — the UK subdivision flags are the named ones above; anything else at least says what
+        // it was instead of leaking invisible tag runes into the '?' fold.
+        if (ContainsTagCharacter(normalized))
+        {
+            return "[flag]";
+        }
+
         if (Rune.TryGetRuneAt(normalized, 0, out var baseRune))
         {
             if (Names.TryGetValue(baseRune.ToString(), out name))
@@ -231,9 +239,10 @@ public static class EmojiNamer
     /// Runes that start an emoji cluster. Ranges are drawn a little generously inside the emoji
     /// planes (an unnamed pictograph becomes <c>[emoji]</c>, which is at worst harmless), but stop
     /// short of blocks that carry ordinary text or technical symbols — those must keep falling to
-    /// <c>?</c> rather than be mislabelled.
+    /// <c>?</c> rather than be mislabelled. The blocks below are mixed, so
+    /// <see cref="IsTextSymbol"/> carves the text glyphs back out of them.
     /// </summary>
-    private static bool IsEmojiBase(int value) => value is
+    private static bool IsEmojiBase(int value) => !IsTextSymbol(value) && value is
         (>= 0x1F000 and <= 0x1FAFF) or   // pictographs, smileys, transport, flags, extended-A
         (>= 0x2600 and <= 0x27BF) or     // misc symbols and dingbats (☀ ⚔ ✅ ❌ …)
         (>= 0x2B00 and <= 0x2BFF) or     // arrows and shapes incl. ⭐
@@ -248,8 +257,38 @@ public static class EmojiNamer
         0x3030 or 0x303D or              // 〰 〽
         0x3297 or 0x3299;                // ㊗ ㊙
 
+    /// <summary>
+    /// Ordinary text glyphs living inside the mixed blocks above — someone's ✓ or ♪ is typed
+    /// text, not a picture, and labelling it <c>[emoji]</c> would misdescribe it. These keep
+    /// falling to the <c>?</c> fold like any other unrenderable text. Their emoji-presentation
+    /// neighbours (✔ ✖ ➡ ➰ and the black card suits) stay emoji bases.
+    /// </summary>
+    private static bool IsTextSymbol(int value) => value is
+        (>= 0x2654 and <= 0x265E) or                             // chess pieces
+        0x2661 or 0x2662 or 0x2664 or 0x2667 or                  // white card suits ♡ ♢ ♤ ♧
+        (>= 0x2669 and <= 0x266F) or                             // music notation ♩ ♪ ♫ ♬ ♭ ♮ ♯
+        0x2713 or 0x2715 or 0x2717 or 0x2718 or                  // light check/ballot marks ✓ ✕ ✗ ✘
+        (>= 0x275B and <= 0x2760) or                             // ornamental quotes and daggers
+        ((>= 0x2794 and <= 0x27BE) and not (0x27A1 or 0x27B0));  // dingbat arrows (➤ …)
+
     private static bool IsClusterExtension(int value) =>
-        value is 0xFE0F or 0x20E3 || IsSkinTone(value);
+        value is 0xFE0F or 0x20E3 || IsSkinTone(value) || IsTagCharacter(value);
+
+    /// <summary>U+E0020–E007F: the invisible spelling inside a tag-sequence flag (🏴󠁧󠁢󠁳󠁣󠁴󠁿 …).</summary>
+    private static bool IsTagCharacter(int value) => value is >= 0xE0020 and <= 0xE007F;
+
+    private static bool ContainsTagCharacter(string cluster)
+    {
+        foreach (var rune in cluster.EnumerateRunes())
+        {
+            if (IsTagCharacter(rune.Value))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static bool IsSkinTone(int value) => value is >= 0x1F3FB and <= 0x1F3FF;
 
@@ -452,6 +491,18 @@ public static class EmojiNamer
         ["▶"] = "arrow_forward",
         ["◀"] = "arrow_backward",
 
+        // Card suits (the black, emoji-presentation ones; the white suits are text and fold to ?)
+        ["♠"] = "spades",
+        ["♣"] = "clubs",
+        ["♥"] = "hearts",
+        ["♦"] = "diamonds",
+
+        // Tag-sequence flags (base 🏴 + invisible region spelling). The guild is a UK crowd, so
+        // the home nations get their Discord names; any other tag sequence says [flag].
+        ["\U0001F3F4\U000E0067\U000E0062\U000E0073\U000E0063\U000E0074\U000E007F"] = "scotland",
+        ["\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F"] = "england",
+        ["\U0001F3F4\U000E0067\U000E0062\U000E0077\U000E006C\U000E0073\U000E007F"] = "wales",
+
         // Coloured circles (raid callouts and the like)
         ["\U0001F534"] = "red_circle",
         ["\U0001F7E2"] = "green_circle",
@@ -463,9 +514,19 @@ public static class EmojiNamer
     };
 
     /// <summary>
+    /// The table entries that default to TEXT presentation despite being astral-plane emoji:
+    /// unlike the rest of the astral entries, these render as monochrome glyphs unless VS16
+    /// follows them. Length alone cannot spot them, so they are listed; without this, restoring
+    /// <c>:dagger:</c> or <c>:shield:</c> would break the exact round trip the reverse map
+    /// promises. MUST be declared before <see cref="EmojiByName"/> (textual initializer order).
+    /// </summary>
+    private static readonly string[] DefaultTextAstral = ["\U0001F5E1" /* dagger */, "\U0001F6E1" /* shield */];
+
+    /// <summary>
     /// <see cref="Names"/> inverted for <see cref="RestoreEmoji"/> — built from the same table so
     /// the two directions cannot drift apart. Case-insensitive because a player types by hand.
-    /// Single-unit BMP entries gain a variation selector so symbols like ❤ and ⚠ take their
+    /// Single-unit BMP entries, plus the astral stragglers in <see cref="DefaultTextAstral"/>,
+    /// gain a variation selector so symbols like ❤ and ⚠ take their
     /// colour emoji presentation in Discord rather than the monochrome text glyph (and
     /// <see cref="Replace"/> strips it again, so the round trip stays exact). MUST be declared
     /// after <see cref="Names"/>: static initializers run in textual order.
@@ -478,7 +539,8 @@ public static class EmojiNamer
 
         foreach (var (emoji, name) in Names)
         {
-            reverse.TryAdd(name, emoji.Length == 1 ? emoji + '\uFE0F' : emoji);
+            var needsPresentation = emoji.Length == 1 || DefaultTextAstral.Contains(emoji);
+            reverse.TryAdd(name, needsPresentation ? emoji + '\uFE0F' : emoji);
         }
 
         return reverse;

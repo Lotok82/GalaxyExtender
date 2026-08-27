@@ -153,6 +153,11 @@ public sealed class RelayOptions
     /// Minimum time between bot-command scans. Like the cleanup sweep this is a floor, not a
     /// schedule: the scan piggybacks request traffic, so with nobody online the heartbeat pinger's
     /// cadence is what actually decides how quickly a "status" mention is answered.
+    ///
+    /// One exception, deliberate: a mention the Stage 2 reader has already fetched (and suppressed
+    /// from the guild room) triggers the next scan regardless of this interval — see
+    /// <see cref="Services.BotCommandScanner.NoteAddressedMention"/>. The interval bounds how often
+    /// the scan goes LOOKING for work; it was never meant to sit on work already found.
     /// </summary>
     public double CommandScanIntervalSeconds { get; set; } = 15;
 
@@ -194,14 +199,15 @@ public sealed class RelayOptions
     /// the bot answering nothing at exactly the times this exists for.
     ///
     /// Cost at the shipped defaults, since a shared host is the constraint: each piece keeps its own
-    /// durable interval stamp, so a tick arriving inside a piece's window costs a couple of
-    /// in-memory reads. The cleanup sweep is genuinely in that position — its window is
+    /// interval stamp, so a tick arriving inside a piece's window costs a couple of in-memory
+    /// reads. The cleanup sweep is genuinely in that position — its window is
     /// <see cref="CleanupIntervalMinutes"/>, far longer than a tick. The command scan is NOT: at 60 s
     /// per tick against a <see cref="CommandScanIntervalSeconds"/> of 15 the scan is due on every
-    /// tick, so the real steady state with the guild empty is ONE channel read and ONE state-file
-    /// write per tick — 60/hour — because claiming the scan stamps it durably. That is the floor
-    /// this feature costs; raising the tick interval lowers it, at the price of the bot's response
-    /// time. Only a tick faster than <see cref="CommandScanIntervalSeconds"/> gets the free ride.
+    /// tick, so the real steady state with the guild empty is ONE channel read per tick — 60/hour.
+    /// (The scan claim used to be a durable stamp, which added a state-file write per tick; it is
+    /// in-memory now.) That is the floor this feature costs; raising the tick interval lowers it,
+    /// at the price of the bot's response time. Only a tick faster than
+    /// <see cref="CommandScanIntervalSeconds"/> gets the free ride.
     /// </summary>
     public double BackgroundTickSeconds { get; set; } = 60;
 
