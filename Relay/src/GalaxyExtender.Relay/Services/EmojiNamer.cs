@@ -84,6 +84,67 @@ public static class EmojiNamer
     }
 
     /// <summary>
+    /// The reverse direction (game → Discord): rewrites known <c>:name:</c> shortcodes to their
+    /// Unicode emoji, so a player typing <c>:joy:</c> in guild chat — or quoting back what
+    /// <see cref="Replace"/> produced — shows 😂 in Discord. Discord itself only converts
+    /// shortcodes in its own input box, never in API-posted content, so the relay must do it.
+    /// Unknown shortcodes pass through literally, exactly as Discord would show them.
+    /// </summary>
+    public static string RestoreEmoji(string text)
+    {
+        var builder = default(StringBuilder);
+        var i = 0;
+
+        while (i < text.Length)
+        {
+            var c = text[i];
+
+            if (c != ':')
+            {
+                builder?.Append(c);
+                i++;
+                continue;
+            }
+
+            var close = text.IndexOf(':', i + 1);
+
+            if (close > i + 1 && close - i - 1 <= MaxShortcodeLength &&
+                IsShortcodeName(text, i + 1, close) &&
+                EmojiByName.TryGetValue(text[(i + 1)..close], out var emoji))
+            {
+                builder ??= new StringBuilder(text.Length).Append(text, 0, i);
+                builder.Append(emoji);
+                i = close + 1;
+                continue;
+            }
+
+            builder?.Append(c);
+            i++;
+        }
+
+        return builder?.ToString() ?? text;
+    }
+
+    /// <summary>
+    /// Generous bound over the longest name in the table; only exists so a colon-heavy line
+    /// (timestamps, class:method notation) never scans far for a closing colon.
+    /// </summary>
+    private const int MaxShortcodeLength = 32;
+
+    private static bool IsShortcodeName(string text, int start, int end)
+    {
+        for (var i = start; i < end; i++)
+        {
+            if (!char.IsAsciiLetterOrDigit(text[i]) && text[i] != '_')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Consumes one emoji cluster starting at <paramref name="start"/> (which the caller has
     /// verified holds an emoji base rune): the base plus any skin tones, variation selectors,
     /// keycap marks, and ZWJ-joined continuations. Regional-indicator letters pair up into flags.
@@ -378,4 +439,26 @@ public static class EmojiNamer
         ["⚫"] = "black_circle",
         ["⚪"] = "white_circle",
     };
+
+    /// <summary>
+    /// <see cref="Names"/> inverted for <see cref="RestoreEmoji"/> — built from the same table so
+    /// the two directions cannot drift apart. Case-insensitive because a player types by hand.
+    /// Single-unit BMP entries gain a variation selector so symbols like ❤ and ⚠ take their
+    /// colour emoji presentation in Discord rather than the monochrome text glyph (and
+    /// <see cref="Replace"/> strips it again, so the round trip stays exact). MUST be declared
+    /// after <see cref="Names"/>: static initializers run in textual order.
+    /// </summary>
+    private static readonly Dictionary<string, string> EmojiByName = BuildReverse();
+
+    private static Dictionary<string, string> BuildReverse()
+    {
+        var reverse = new Dictionary<string, string>(Names.Count, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (emoji, name) in Names)
+        {
+            reverse.TryAdd(name, emoji.Length == 1 ? emoji + '\uFE0F' : emoji);
+        }
+
+        return reverse;
+    }
 }
