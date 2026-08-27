@@ -246,13 +246,16 @@ see the whole conversation rather than none of it:
 
 ```
 [Discord] Bob: @YourBot will the boss drop anything good tonight?
-[Discord] Magic 8-Ball: Never tell me the odds. (They're not great.)
+[Discord] YourBot: Never tell me the odds. (They're not great.)
 ```
 
 With nobody online the reply still posts in Discord but **nothing is queued for later** — a fortune
 injected into the guild room hours after it was asked is noise, not conversation. The injection
 path itself is the ordinary Stage 2 queue (claims, acks, TTL, the pending cap), with the answer
-queued under the reply's own message id so it always follows its question. `status` and `help`
+queued under the reply's own message id so it always follows its question. The answer speaks under
+the bot's own name, still with nothing baked in: Discord reports the current display name on the
+reply the relay just posted (falling back to the name carried by the mention itself), so renaming
+the bot renames the in-game speaker too. `status` and `help`
 replies stay Discord-only on purpose: they are multi-line markdown about the bridge itself, and the
 in-game equivalent is `/emu discord status`.
 
