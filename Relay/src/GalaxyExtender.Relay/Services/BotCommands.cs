@@ -3,45 +3,53 @@ using System.Text;
 namespace GalaxyExtender.Relay.Services;
 
 /// <summary>
-/// Recognises the handful of things the bridge bot answers to when someone mentions it in the
-/// bridge channel — <c>@GalaxyExtender status</c> and friends (R11).
+/// Recognises what the bridge bot answers to when someone mentions it in the bridge channel —
+/// <c>@GalaxyExtender status</c> and friends (R11).
 ///
-/// Deliberately narrow. An unrecognised mention is <see cref="BotCommand.None"/> and gets NO reply:
-/// the bot lives in a chat channel where people will mention it in passing, and a bot that answers
-/// everything it is named in becomes noise nobody wants in the channel. A bare mention with no
-/// words is the one exception — that is someone asking what the bot does, so it gets the help line.
+/// The real commands are matched by word; every other addressed mention is the magic eight ball
+/// (<see cref="BotCommand.EightBall"/>), a deliberate toy: addressing the bot is a conversational
+/// act, and a stock one-liner back is friendlier than silence. That makes any ADDRESSED mention
+/// (<see cref="IsAddressed"/>) bot conversation rather than guild-bound chat, which is why the
+/// Stage 2 reader suppresses it from injection — but only while it is fresh enough for the scan
+/// to still answer it; anything the scan would skip as stale flows to the guild room as ordinary
+/// chat instead of vanishing. A bare mention with no words is someone asking what the bot does,
+/// so it gets the help line rather than a fortune.
 /// </summary>
 public static class BotCommands
 {
     public enum BotCommand
     {
-        /// <summary>Not addressed to us, or not a command we know. No reply.</summary>
+        /// <summary>Not addressed to us at all. No reply.</summary>
         None,
 
         /// <summary>Is anyone running the extension, and how many.</summary>
         Status,
 
         /// <summary>What can I ask you.</summary>
-        Help
+        Help,
+
+        /// <summary>Anything else the bot is asked: one of a hundred stock answers.</summary>
+        EightBall
     }
 
     /// <summary>
-    /// True when <paramref name="message"/> addresses the bot directly: Discord's own
-    /// <c>mentions</c> array names it (which also covers a reply-with-mention), or its
-    /// <c>&lt;@id&gt;</c> / <c>&lt;@!id&gt;</c> token appears in the content. Both are checked
-    /// because the mentions array is the reliable signal but is not guaranteed to be present on
-    /// every payload shape.
+    /// True when the author deliberately addressed the bot: its <c>&lt;@id&gt;</c> /
+    /// <c>&lt;@!id&gt;</c> token appears in the message CONTENT, which is what typing or picking
+    /// <c>@bot</c> in any Discord client produces. The message's <c>mentions</c> array is
+    /// deliberately NOT consulted — Discord adds the replied-to author to it on every
+    /// default reply, so trusting it would turn each ordinary reply to a bot post into "bot
+    /// conversation": suppressed from the guild room and answered with a fortune, when the
+    /// author never addressed the bot at all.
+    ///
+    /// This is THE shared predicate for "is this message bot conversation rather than guild
+    /// chat". The Stage 2 reader (suppression) and the command scanner (answering) must both
+    /// call it, so the two paths cannot disagree about the same message.
     /// </summary>
-    public static bool Mentions(DiscordMessage message, string botUserId)
+    public static bool IsAddressed(DiscordMessage message, string botUserId)
     {
         if (string.IsNullOrEmpty(botUserId))
         {
             return false;
-        }
-
-        if (message.MentionNames.ContainsKey(botUserId))
-        {
-            return true;
         }
 
         var content = message.Content;
@@ -55,7 +63,8 @@ public static class BotCommands
     /// Maps the words around the mention to a command. Word-anywhere matching rather than
     /// "first word must be the verb", because <c>@bot status</c>, <c>@bot what's the status?</c> and
     /// <c>hey @bot status</c> are all the same question and Discord clients put the mention wherever
-    /// the typist did.
+    /// the typist did. Never returns <see cref="BotCommand.None"/>: a mention that matches nothing
+    /// real is a question for the eight ball.
     /// </summary>
     public static BotCommand Parse(string? content)
     {
@@ -73,7 +82,7 @@ public static class BotCommands
 
         return words.Contains("help") || words.Contains("commands")
             ? BotCommand.Help
-            : BotCommand.None;
+            : BotCommand.EightBall;
     }
 
     /// <summary>

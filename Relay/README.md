@@ -228,10 +228,50 @@ reach a message the relay itself authored. Any client connected reads as online;
 offline, with how long since the last one was seen, which is the useful part of a negative answer.
 
 `status` (also `online` / `who`) reports it; `help` and a bare mention get the one-line help;
-**anything else the bot is merely named in gets no reply at all** — it shares a channel with people,
-and a bot that answers everything becomes noise. Replies quote the command and carry
-`allowed_mentions: {"parse": []}`. A command is answered in Discord and **not** injected into the
-guild room.
+**anything else the bot is deliberately addressed in gets a magic eight ball answer** — one of a
+hundred stock phrases, picked by hashing the message id, so the same message always maps to the same
+fortune and asking again (a new message) shakes the ball again. "Deliberately addressed" means the
+typed `@bot` token appears in the message text; merely pressing reply on one of the bot's posts
+pings it through Discord's mentions array without addressing it, and that stays ordinary guild
+chat — delivered, and not answered.
+
+```
+@YourBot will the boss drop anything good tonight?
+→ Never tell me the odds. (They're not great.)
+```
+
+Replies quote the command and carry `allowed_mentions: {"parse": []}` (no eight ball phrase contains
+an `@` anyway).
+
+**Eight-ball exchanges also appear in the guild room — but only live.** While at least one client is
+online, the scan queues both halves for injection right after the reply posts — and it runs as soon
+as the Stage 2 reader has fetched the mention rather than waiting out its own interval, so the whole
+exchange lands within one poll cycle. Players in game see the whole conversation rather than none of
+it:
+
+```
+[Discord] Bob: @YourBot will the boss drop anything good tonight?
+[Discord] YourBot: Never tell me the odds. (They're not great.)
+```
+
+With nobody online the reply still posts in Discord but **the answered exchange is not queued for
+later** — the asker already has the answer, and a fortune injected into the guild room hours after
+it was asked is noise, not conversation. The injection path itself is the ordinary Stage 2 queue
+(claims, acks, TTL, the pending cap), with the answer queued under the reply's own message id so it
+always follows its question. The answer speaks under the bot's own name, still with nothing baked
+in: Discord reports the current display name on the reply the relay just posted (falling back to
+the name carried by the mention itself, then to the name `users/@me` reported), so renaming the bot
+renames the in-game speaker too. `status` and `help` replies stay Discord-only on purpose: they are
+multi-line markdown about the bridge itself, and the in-game equivalent is `/emu discord status`.
+
+**A question the bot never answers is never lost.** The reader suppresses an addressed mention only
+while it is fresh enough for the scan to still answer it; a mention the bot stays silent on — the
+per-scan reply budget was spent, the reply POST failed, or the relay caught up with it too late —
+is queued (or, when stale, injected) as ordinary guild-bound chat instead of vanishing. The raw
+mention and the bot's reply are still never injected directly while the scan is answering — the
+reader and the scan share one addressed-mention predicate, and the echo filter drops bot posts; the
+queued exchange above is the one road in. Addressed mentions also don't earn delivery notices: the
+eight ball answers instead.
 
 ### Unprompted delivery notices
 
@@ -271,10 +311,13 @@ simply deaf whenever the guild was empty.
 
 There is no gateway connection, so "the bot listens" means the relay reads the channel on the back
 of authenticated request traffic — chat POSTs, presence pings, Stage 2 polls and `/heartbeat` — or
-on a background tick, at most once per `CommandScanIntervalSeconds`, claimed atomically through the
-durable `lastCommandScanUtc` stamp. **With nobody in game, the tick interval is the bot's response
-time**, which is exactly the case that matters: "is it online?" gets asked when it looks
-like it isn't. The scan keeps its own cursor, independent of Stage 2's, so it works with the read
+on a background tick, at most once per `CommandScanIntervalSeconds` (the claim is in-memory; a
+recycle just means one early scan). The interval bounds how often the scan goes *looking* — it never
+sits on work already found: when the Stage 2 reader fetches a message addressed to the bot, it flags
+the scanner and the very same poll scans, answers, and hands the eight-ball exchange to its own
+claim. **While anyone is online a mention is therefore answered within the reader's fetch window —
+seconds — and with nobody in game, the tick interval is the bot's response time**, which is exactly
+the case that matters: "is it online?" gets asked when it looks like it isn't. The scan keeps its own cursor, independent of Stage 2's, so it works with the read
 path switched off; the first scan after enabling stamps that cursor and answers nothing, so turning
 the feature on never replies to mentions already in the channel. Replies are at-most-once — the
 cursor advances before anything is posted, because a missed answer is invisible and a duplicated one
@@ -331,16 +374,16 @@ none was ever set up, so in practice the gap was total.
 
 `Relay:BackgroundTickSeconds` (default 60) runs the same three pieces of work a request carries,
 on a timer. It adds no behaviour of its own and no Discord traffic an equivalent request would not
-have caused: each piece keeps its durable interval stamp, so a tick arriving inside a piece's window
+have caused: each piece keeps its interval stamp, so a tick arriving inside a piece's window
 is a few in-memory reads. `0` switches it off and restores the old behaviour exactly.
 
 That free ride applies to the cleanup sweep, whose window (`CleanupIntervalMinutes`, 15 min) is far
 longer than a tick. It does **not** apply to the command scan: at the shipped defaults the tick
 (60 s) is slower than `CommandScanIntervalSeconds` (15 s), so the scan is due every time. Steady
-state with the guild empty is therefore **one Discord channel read and one `relay-state.json` write
-per tick** — 60 an hour, round the clock — because claiming a scan stamps it durably. That is the
-floor this feature costs; a longer `BackgroundTickSeconds` lowers it, at the price of the bot's
-response time.
+state with the guild empty is therefore **one Discord channel read per tick** — 60 an hour, round
+the clock. (The scan claim used to be a durable stamp, which added a `relay-state.json` write per
+tick; it is in-memory now.) That is the floor this feature costs; a longer `BackgroundTickSeconds`
+lowers it, at the price of the bot's response time.
 
 The request-piggybacked calls stay where they are rather than deferring to the timer, because the
 timer is the part that can be taken away:

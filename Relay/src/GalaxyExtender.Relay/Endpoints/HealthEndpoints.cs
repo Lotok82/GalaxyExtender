@@ -18,13 +18,14 @@ public static class HealthEndpoints
             IStateStore stateStore,
             PresenceTracker presenceTracker,
             BackgroundTicker ticker,
+            BotCommandScanner commands,
             HttpContext http) =>
         {
             var now = DateTimeOffset.UtcNow;
             var appData = probe.CheckAppData();
 
             var (outboxDepth, dedupeEntries, lastForwardUtc, stage2Pending, stage2Cursor, lastCleanupUtc,
-                    lastCommandScanUtc, botUserIdKnown, lastAlertPingUtc) =
+                    botUserIdKnown, lastAlertPingUtc) =
                 stateStore.Read(state => (
                     state.Outbox.Count,
                     state.Dedupe.Count,
@@ -32,7 +33,6 @@ public static class HealthEndpoints
                     state.Stage2Pending.Count,
                     state.Stage2Cursor is not null,
                     state.LastCleanupUtc,
-                    state.LastCommandScanUtc,
                     state.BotUserId is not null,
                     state.LastAlertPingUtc));
 
@@ -107,7 +107,9 @@ public static class HealthEndpoints
                     stage2Pending,
                     stage2CursorInitialised = stage2Cursor,
                     lastCleanupUtc,
-                    lastCommandScanUtc,
+                    // In-memory since the scan claim stopped being durable: like the ticker's
+                    // readings, read it against process.startedUtc — a reset means a recycle.
+                    lastCommandScanUtc = commands.LastScanUtc,
                     botUserIdKnown,
                     lastAlertPingUtc
                 },

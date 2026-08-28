@@ -34,6 +34,13 @@ public sealed class RelayState
     public List<PendingEntry> Stage2Pending { get; set; } = [];
 
     /// <summary>
+    /// Monotonic admission counter for <see cref="Stage2Pending"/>. <see cref="Stage2Queue"/>'s
+    /// enqueue stamps each entry's <see cref="PendingEntry.Sequence"/> from it, so claim order
+    /// stays deterministic even between entries whose ids tie or cannot be parsed.
+    /// </summary>
+    public long Stage2Sequence { get; set; }
+
+    /// <summary>
     /// Messages lost since the last poll that reported them (TTL expiry or redelivery cap).
     /// Report-once: handed to exactly one poller and reset to zero.
     /// </summary>
@@ -60,11 +67,10 @@ public sealed class RelayState
     /// </summary>
     public string? CommandCursor { get; set; }
 
-    /// <summary>
-    /// When the last bot-command scan started, successful or not — the interval claim, exactly like
-    /// <see cref="LastCleanupUtc"/>.
-    /// </summary>
-    public DateTimeOffset? LastCommandScanUtc { get; set; }
+    // The bot-command scan's interval claim used to live here as LastCommandScanUtc; it is
+    // in-memory in BotCommandScanner now (a durable stamp cost a full state-file write per scan
+    // and bought only the avoidance of one early scan after a recycle). Old state files still
+    // carrying the field deserialize fine — unknown JSON properties are ignored.
 
     /// <summary>
     /// The bot's own Discord user id, discovered once from <c>GET /users/@me</c> so that mentions of
@@ -72,6 +78,15 @@ public sealed class RelayState
     /// override it with <c>Discord:BotUserId</c>, which then takes precedence over this.
     /// </summary>
     public string? BotUserId { get; set; }
+
+    /// <summary>
+    /// The bot's username as <c>GET /users/@me</c> reported it, latched alongside
+    /// <see cref="BotUserId"/>. Last-resort author for an injected eight-ball answer when the
+    /// reply POST's response carried no author and the question's mention entry is missing too —
+    /// better than the generic "discord" placeholder. The reply's own author still wins, so a
+    /// rename shows up as soon as Discord reports it.
+    /// </summary>
+    public string? BotUserName { get; set; }
 
     /// <summary>
     /// When the bot last told the channel that a message was not going to reach the guild room as
@@ -146,7 +161,13 @@ public sealed class BatchEntry
 /// <summary>One Discord message in the Stage 2 work queue, with its claim bookkeeping.</summary>
 public sealed class PendingEntry
 {
-    /// <summary>Discord snowflake — unique, ascending, and the claim key.</summary>
+    /// <summary>
+    /// Discord snowflake — the claim key, and the primary claim-order key. Almost always the
+    /// message's real id; the one exception is an eight-ball answer whose reply POST returned an
+    /// unreadable body, where <see cref="BotCommandScanner"/> fabricates one past the question's
+    /// id. That fabricated value can in principle collide with a real later snowflake, which is
+    /// why <see cref="Sequence"/> — not id arithmetic — is what breaks ties.
+    /// </summary>
     public string Id { get; set; } = string.Empty;
 
     /// <summary>Sanitized display name, ≤ 32 chars.</summary>
@@ -160,6 +181,14 @@ public sealed class PendingEntry
 
     /// <summary>When the relay fetched it — the TTL runs from here, not from Discord's stamp.</summary>
     public DateTimeOffset ReceivedUtc { get; set; }
+
+    /// <summary>
+    /// Admission order, stamped by <see cref="Stage2Queue"/>'s enqueue from
+    /// <see cref="RelayState.Stage2Sequence"/>. Claim order is id first, then this — it is what
+    /// keeps an eight-ball answer directly after its question even when the answer's id had to be
+    /// fabricated. Entries persisted before the field existed read as 0 and simply keep id order.
+    /// </summary>
+    public long Sequence { get; set; }
 
     /// <summary>Claims handed out so far (initial delivery + redeliveries).</summary>
     public int Deliveries { get; set; }

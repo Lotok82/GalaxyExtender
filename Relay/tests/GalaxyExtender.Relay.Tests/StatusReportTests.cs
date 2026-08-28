@@ -148,8 +148,8 @@ public sealed class StatusReportTests
     [InlineData("<@424242>", BotCommands.BotCommand.Help)]
     [InlineData("<@424242> help", BotCommands.BotCommand.Help)]
     [InlineData("<@424242> commands", BotCommands.BotCommand.Help)]
-    [InlineData("<@424242> is a good bot", BotCommands.BotCommand.None)]
-    [InlineData("<@424242> statuses are fine", BotCommands.BotCommand.None)]
+    [InlineData("<@424242> is a good bot", BotCommands.BotCommand.EightBall)]
+    [InlineData("<@424242> statuses are fine", BotCommands.BotCommand.EightBall)]
     public void Commands_are_recognised_by_word_not_by_position(string content, BotCommands.BotCommand expected) =>
         Assert.Equal(expected, BotCommands.Parse(content));
 
@@ -157,8 +157,9 @@ public sealed class StatusReportTests
     public void An_id_inside_a_mention_token_is_never_read_as_a_word()
     {
         // An emoji or channel token whose NAME happens to be a command must not trigger one: the
-        // token is stripped whole, so only what the typist actually wrote counts as words.
-        Assert.Equal(BotCommands.BotCommand.None, BotCommands.Parse("<@424242> <:status:12345> nice"));
+        // token is stripped whole, so only what the typist actually wrote counts as words — and
+        // "nice" is a question for the eight ball, not a status request.
+        Assert.Equal(BotCommands.BotCommand.EightBall, BotCommands.Parse("<@424242> <:status:12345> nice"));
     }
 
     private static DiscordMessage Message(string? content, params string[] mentionIds) =>
@@ -167,22 +168,24 @@ public sealed class StatusReportTests
             mentionIds.ToDictionary(id => id, _ => "GalaxyExtender"));
 
     [Fact]
-    public void A_mention_is_recognised_from_the_mentions_array()
+    public void A_reply_that_only_pings_through_the_mentions_array_is_not_addressed()
     {
-        // Covers a reply-with-mention, where the content carries no <@id> token at all.
-        Assert.True(BotCommands.Mentions(Message("status", "424242"), "424242"));
+        // Discord puts the replied-to author in the mentions array on every default reply, with
+        // no <@id> token in the content. That is somebody replying NEAR the bot, not talking TO
+        // it — treating it as addressed would eat ordinary guild-bound replies to bot posts.
+        Assert.False(BotCommands.IsAddressed(Message("nobody's on then, restocking tonight", "424242"), "424242"));
     }
 
     [Fact]
-    public void A_mention_is_recognised_from_the_content_token_alone()
+    public void A_typed_mention_is_recognised_from_the_content_token()
     {
-        Assert.True(BotCommands.Mentions(Message("<@424242> status"), "424242"));
-        Assert.True(BotCommands.Mentions(Message("<@!424242> status"), "424242"));
+        Assert.True(BotCommands.IsAddressed(Message("<@424242> status"), "424242"));
+        Assert.True(BotCommands.IsAddressed(Message("<@!424242> status"), "424242"));
     }
 
     [Fact]
     public void Somebody_elses_mention_is_not_ours()
     {
-        Assert.False(BotCommands.Mentions(Message("<@999> status", "999"), "424242"));
+        Assert.False(BotCommands.IsAddressed(Message("<@999> status", "999"), "424242"));
     }
 }
