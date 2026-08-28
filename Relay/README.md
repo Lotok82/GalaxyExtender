@@ -90,6 +90,9 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Relay:Stage2MaxPending` | `50` | Pending queue cap; oldest dropped (counted) beyond it. |
 | `Relay:Stage2MaxPerPoll` | `5` | Messages claimed per poll. |
 | `Relay:Stage2FetchCacheSeconds` | `2.5` | Discord fetch freshness window — polls inside it skip the Discord call. |
+| `Discord:NicknamesEnabled` | `true` | Show each speaker's **server nickname** on injected lines rather than their Discord account display name. On by default, unlike the other switches here: it changes only which of a person's own names the guild sees, not whether the relay authors anything. Costs one member read per speaker per `Relay:NicknameCacheMinutes`. |
+| `Discord:GuildId` | — | Override for the bridge channel's guild, used by the nickname reads. Normally left empty: it is discovered once from `GET /channels/{id}` and cached in durable state, like `Discord:BotUserId`. |
+| `Relay:NicknameCacheMinutes` | `60` | How long a speaker's server nickname is reused before Discord is asked again. A rename shows up in the guild room within this. |
 | `Discord:CleanupEnabled` | `false` | Operator switch for the channel-history cleanup below. Off by default — deleting history must be an explicit decision, never a side effect of a deploy. |
 | `Relay:CleanupMaxAgeHours` | `5` | Bridge-channel messages older than this are deleted; pinned messages always survive. |
 | `Relay:CleanupIntervalMinutes` | `15` | Minimum time between cleanup sweeps. |
@@ -650,6 +653,16 @@ trusted beyond that.
   not an empty guild. (What *can* still lose a waiting message: the R10 channel tidy-up deleting
   it from Discord first, or a backlog beyond the 50-message fetch/queue caps. The bot says so —
   see [Bot commands and presence](#bot-commands-and-presence-r11).)
+- `author` is the name the guild recognises, in this order: the speaker's **server nickname** in
+  the bridge channel's guild, then Discord's account-level display name (`global_name`), then
+  their `username`, then `discord` if nothing survives sanitizing. The nickname is not in the
+  message payload — `member.nick` rides along with gateway events and the relay polls REST — so it
+  costs a `GET /guilds/{guild}/members/{user}` per speaker, cached for `Relay:NicknameCacheMinutes`
+  (60) with "this person has no nickname" cached just as firmly. A capped 10 lookups per fetch, a
+  15-minute pause after any failure that is not a plain 404, and a fall back to the account name on
+  every failure path: nothing about the lookup can keep a message out of the guild room. Turn the
+  whole thing off with `Discord:NicknamesEnabled=false`. `<@id>` mentions inside `text` resolve
+  through the same names.
 - `text` is pre-sanitized by the relay (R5: mentions/emoji resolved, newlines collapsed, SWG
   escapes stripped — the Core3 server does not strip `\#` colour codes itself) and pre-clamped:
   `author` ≤ 32 chars, `text` ≤ 200 chars, so the full injected line

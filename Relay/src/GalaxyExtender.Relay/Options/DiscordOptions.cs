@@ -52,6 +52,36 @@ public sealed class DiscordOptions
     public string? BotUserId { get; set; }
 
     /// <summary>
+    /// Show each speaker's SERVER nickname on injected lines, rather than the account-level display
+    /// name Discord puts in the message payload. On by default, unlike every other switch here, and
+    /// for the opposite reason: those turn on the relay AUTHORING something (posts, deletions), so a
+    /// redeploy must never start them, while this only changes which of a person's own names is
+    /// shown to the guild — and the guild recognises the nickname, which is why people set one.
+    ///
+    /// Costs one <c>GET /guilds/{guild}/members/{user}</c> per speaker per
+    /// <see cref="RelayOptions.NicknameCacheMinutes"/>; see <see cref="Services.GuildNicknames"/> for
+    /// how that is bounded. Turning it off is the kill switch if those calls ever become a problem;
+    /// nothing else changes, and names fall back to <c>global_name</c>.
+    /// </summary>
+    public bool NicknamesEnabled { get; set; } = true;
+
+    /// <summary>
+    /// The guild the bridge channel lives in, used for nickname reads. Normally left empty: the
+    /// relay discovers it from <c>GET /channels/{id}</c> on first need and caches it durably, the
+    /// same way it discovers <see cref="BotUserId"/>. Set it only to override that.
+    /// </summary>
+    public string? GuildId { get; set; }
+
+    /// <summary>
+    /// The configured guild override, or null when absent or blank. Blank collapses here rather
+    /// than at the call site for the same reason as <see cref="ConfiguredBotUserId"/> below — an
+    /// empty string read as a real id would send every nickname lookup to <c>guilds//members/...</c>
+    /// and fail forever, which looks exactly like the feature being off.
+    /// </summary>
+    public string? ConfiguredGuildId =>
+        string.IsNullOrWhiteSpace(GuildId) ? null : GuildId;
+
+    /// <summary>
     /// The configured override, or null when it is absent OR blank — the single answer both the
     /// command scan and the Stage 2 reader resolve against.
     ///

@@ -89,6 +89,15 @@ public sealed class RelayState
     public string? BotUserName { get; set; }
 
     /// <summary>
+    /// The guild the bridge channel belongs to, discovered once from <c>GET /channels/{id}</c> so
+    /// that per-server nicknames can be read. Cached durably for the same reason as
+    /// <see cref="BotUserId"/>: it cannot change unless the channel id does, so paying for the
+    /// lookup more than once would be paying for nothing. Overridable with <c>Discord:GuildId</c>,
+    /// which then takes precedence over this.
+    /// </summary>
+    public string? GuildId { get; set; }
+
+    /// <summary>
     /// When the bot last told the channel that a message was not going to reach the guild room as
     /// posted. Durable so a recycle cannot turn one notice into one per app start, and rate-limited
     /// by <see cref="RelayOptions.DeliveryNoticeIntervalMinutes"/>.
