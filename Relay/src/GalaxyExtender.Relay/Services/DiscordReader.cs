@@ -23,6 +23,7 @@ public sealed class DiscordReader(
     IOptionsMonitor<DiscordOptions> options,
     IOptionsMonitor<RelayOptions> relayOptions,
     IStateStore store,
+    BotCommandScanner commands,
     ILogger<DiscordReader> logger)
 {
     public const string HttpClientName = "discord-bot";
@@ -161,6 +162,13 @@ public sealed class DiscordReader(
         var now = DateTimeOffset.UtcNow;
         var relay = relayOptions.CurrentValue;
 
+        // Suppression must not outlive answerability: the scan skips mentions older than
+        // CommandMaxAgeSeconds, so a mention past that age (a backlog after a recycle) is
+        // ordinary chat here or it would vanish — unanswered AND undelivered.
+        var staleCutoff = now.AddSeconds(-relay.CommandMaxAgeSeconds);
+
+        var mentionSuppressed = false;
+
         var enqueued = store.Mutate(state =>
         {
             state.Stage2Cursor = newCursor;
@@ -170,7 +178,7 @@ public sealed class DiscordReader(
                 return 0;
             }
 
-            var added = 0;
+            var entries = new List<PendingEntry>();
 
             foreach (var message in fetched)
             {
@@ -180,13 +188,17 @@ public sealed class DiscordReader(
                     continue;
                 }
 
-                // R11: "@GalaxyExtender status" is addressed to the bot, not to the guild. The
-                // command scan answers it in Discord; injecting it into the guild room too would
-                // put half a conversation with a bot in front of players.
+                // R11: "@GalaxyExtender status" — or any addressed mention, now that the eight
+                // ball answers the rest — is bot conversation, not guild chat. The command scan
+                // answers it in Discord and queues the eight-ball exchange itself; injecting the
+                // raw mention here too would duplicate it. IsAddressed is the SAME predicate the
+                // scan uses, so the two paths cannot disagree about a message; the freshness
+                // bound mirrors the scan's stale skip for the same reason.
                 if (botUserId is not null &&
-                    BotCommands.Mentions(message, botUserId) &&
-                    BotCommands.Parse(message.Content) != BotCommands.BotCommand.None)
+                    message.TimestampUtc >= staleCutoff &&
+                    BotCommands.IsAddressed(message, botUserId))
                 {
+                    mentionSuppressed = true;
                     continue;
                 }
 
@@ -199,7 +211,7 @@ public sealed class DiscordReader(
                     continue;
                 }
 
-                state.Stage2Pending.Add(new PendingEntry
+                entries.Add(new PendingEntry
                 {
                     Id = message.Id,
                     Author = Stage2Sanitizer.SanitizeAuthor(message.GlobalName, message.Username),
@@ -207,18 +219,11 @@ public sealed class DiscordReader(
                     TimestampUtc = message.TimestampUtc,
                     ReceivedUtc = now
                 });
-
-                added++;
             }
 
-            // Queue cap (R6): oldest dropped and counted — newest chat is what still matters.
-            while (state.Stage2Pending.Count > relay.Stage2MaxPending)
-            {
-                state.Stage2Pending.RemoveAt(0);
-                state.Stage2Dropped++;
-            }
+            Stage2Queue.Enqueue(state, relay.Stage2MaxPending, entries);
 
-            return added;
+            return entries.Count;
         });
 
         if (initialising)
@@ -228,6 +233,14 @@ public sealed class DiscordReader(
         else if (enqueued > 0)
         {
             logger.LogInformation("Fetched {Enqueued} Discord message(s) into the Stage 2 queue", enqueued);
+        }
+
+        // Suppressing the mention was a promise that the command scan answers it; this is what
+        // keeps the promise prompt. The scan runs on the caller's request path (the endpoints call
+        // it after this fetch), regardless of its interval — see NoteAddressedMention.
+        if (mentionSuppressed)
+        {
+            commands.NoteAddressedMention();
         }
     }
 }

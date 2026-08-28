@@ -36,6 +36,29 @@ public sealed class Stage2Queue(
         $"{Marker}{author}: {text}";
 
     /// <summary>
+    /// Admission into the queue — the ONLY way entries should be added, so the rules live once:
+    /// each entry gets the next claim-order sequence, and the cap (R6) then drops the oldest
+    /// entries, counted for the report-once drop counter. Oldest-first eviction means a
+    /// question/answer pair appended together is never split by any sane cap (both entries are
+    /// the newest in the queue). Callers run this inside a store mutate.
+    /// </summary>
+    public static void Enqueue(RelayState state, int maxPending, IReadOnlyList<PendingEntry> entries)
+    {
+        foreach (var entry in entries)
+        {
+            entry.Sequence = ++state.Stage2Sequence;
+            state.Stage2Pending.Add(entry);
+        }
+
+        // Queue cap (R6): oldest dropped and counted — newest chat is what still matters.
+        while (state.Stage2Pending.Count > maxPending)
+        {
+            state.Stage2Pending.RemoveAt(0);
+            state.Stage2Dropped++;
+        }
+    }
+
+    /// <summary>
     /// Claims the next batch for <paramref name="claimant"/>. Runs the prune (TTL, delivery cap)
     /// first so nothing stale is ever handed out. The cheap read-only guard keeps idle polls —
     /// the overwhelmingly common case — free of state-file writes.
@@ -57,9 +80,14 @@ public sealed class Stage2Queue(
             var timeout = TimeSpan.FromSeconds(current.Stage2RedeliveryTimeoutSeconds);
             var claimed = new List<PendingMessage>();
 
+            // Discord-chronological by snowflake, with the admission sequence breaking ties —
+            // BotCommandScanner relies on this pair of keys to keep an eight-ball answer directly
+            // after its question even when the answer's id had to be fabricated (see
+            // PendingEntry.Id); change the ordering only together with that.
             foreach (var entry in state.Stage2Pending
                          .Where(e => e.ClaimedUtc is null || now - e.ClaimedUtc >= timeout)
                          .OrderBy(e => ulong.TryParse(e.Id, out var id) ? id : ulong.MaxValue)
+                         .ThenBy(e => e.Sequence)
                          .Take(current.Stage2MaxPerPoll))
             {
                 if (entry.Deliveries > 0)

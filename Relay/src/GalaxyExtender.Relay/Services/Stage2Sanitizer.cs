@@ -47,9 +47,10 @@ public static class Stage2Sanitizer
     /// <summary>
     /// The injected message text. <paramref name="mentionNames"/> maps user id → display name
     /// from the message's own <c>mentions</c> array, so <c>&lt;@id&gt;</c> tokens resolve without
-    /// extra API calls. The marker flags append <c>[attachment]</c>/<c>[embed]</c>/<c>[sticker]</c>
-    /// so an image-only message still says something in game. Empty result = nothing worth
-    /// injecting; the caller skips the message.
+    /// extra API calls. Unicode emoji become readable via <see cref="EmojiNamer"/> before the
+    /// character pass can fold them to <c>?</c>. The marker flags append
+    /// <c>[attachment]</c>/<c>[embed]</c>/<c>[sticker]</c> so an image-only message still says
+    /// something in game. Empty result = nothing worth injecting; the caller skips the message.
     /// </summary>
     public static string SanitizeText(
         string? content,
@@ -58,7 +59,7 @@ public static class Stage2Sanitizer
         bool hasEmbeds,
         bool hasStickers)
     {
-        var resolved = ResolveTokens(content ?? string.Empty, mentionNames);
+        var resolved = EmojiNamer.Replace(ResolveTokens(content ?? string.Empty, mentionNames));
 
         if (hasAttachments)
         {
@@ -308,6 +309,11 @@ public static class Stage2Sanitizer
         {
             return Drop;   // zero-width and directional marks
         }
+
+        if (c is '️' or '⃣')
+        {
+            return Drop;   // emoji variation selector / keycap mark left behind by a non-emoji
+        }                  // base (e.g. the digit in "1️⃣") — the digit alone reads fine
 
         if (c >= '̀' && c <= 'ͯ')
         {

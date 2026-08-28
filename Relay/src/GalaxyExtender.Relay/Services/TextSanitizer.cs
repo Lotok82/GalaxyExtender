@@ -72,10 +72,16 @@ public static class TextSanitizer
 
     /// <summary>
     /// Presentation pass, in the order the plan specifies:
-    /// 1. neutralise <c>@everyone</c>/<c>@here</c> with a zero-width joiner (belt) — the webhook
+    /// 1. restore known <c>:name:</c> shortcodes to Unicode emoji (<see cref="EmojiNamer"/> —
+    ///    Discord only converts shortcodes in its own input box, never in API-posted content);
+    /// 2. neutralise <c>@everyone</c>/<c>@here</c> with a zero-width joiner (belt) — the webhook
     ///    payload also carries <c>allowed_mentions: {parse: []}</c> (braces);
-    /// 2. escape Discord markdown so player text renders literally;
-    /// 3. clamp to <paramref name="maxLength"/> characters.
+    /// 3. escape Discord markdown so player text renders literally;
+    /// 4. clamp to <paramref name="maxLength"/> characters.
+    ///
+    /// The emoji step runs first so a restored emoji can never be markdown-escaped, and lives
+    /// here rather than in <see cref="Normalize"/> because it is presentation: the dedupe hash
+    /// must keep seeing the exact typed text.
     ///
     /// <paramref name="target"/> is not a style preference — it decides whether bracket escaping
     /// happens, and the two destinations made different safety/legibility trade-offs (see
@@ -84,7 +90,7 @@ public static class TextSanitizer
     /// </summary>
     public static string ForDiscord(string normalized, int maxLength, DiscordTarget target)
     {
-        var text = normalized
+        var text = EmojiNamer.RestoreEmoji(normalized)
             .Replace("@everyone", "@\u200Deveryone", StringComparison.OrdinalIgnoreCase)
             .Replace("@here", "@\u200Dhere", StringComparison.OrdinalIgnoreCase);
 
@@ -128,8 +134,15 @@ public static class TextSanitizer
         {
             builder.Length = maxLength;
 
+            // Never end mid-emoji: a restored shortcode is an astral pair, and cutting between
+            // the surrogates would ship invalid UTF-16 (serialised as U+FFFD at best).
+            if (builder.Length > 0 && char.IsHighSurrogate(builder[^1]))
+            {
+                builder.Length--;
+            }
+
             // Never end on the escaping backslash we just added.
-            if (builder[^1] == '\\')
+            if (builder.Length > 0 && builder[^1] == '\\')
             {
                 builder.Length--;
             }

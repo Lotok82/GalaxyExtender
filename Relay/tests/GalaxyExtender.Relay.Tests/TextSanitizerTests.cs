@@ -97,6 +97,75 @@ public sealed class TextSanitizerTests
             "clamped text must not end with a dangling escape backslash");
     }
 
+    /// <summary>
+    /// The emoji restore runs before the clamp, so an astral pair can straddle the limit; cutting
+    /// between its surrogates would ship invalid UTF-16 that serialises as a replacement glyph.
+    /// </summary>
+    [Fact]
+    public void ForDiscord_clamp_never_splits_a_surrogate_pair()
+    {
+        // 'a' x 511 leaves exactly one UTF-16 unit of room; the restored 😂 needs two.
+        var result = TextSanitizer.ForDiscord(
+            new string('a', 511) + ":joy:", 512, DiscordTarget.PlainMessage);
+
+        Assert.True(result.Length <= 512);
+        Assert.False(char.IsHighSurrogate(result[^1]), "clamped text must not end mid-surrogate-pair");
+    }
+
+    // --- emoji shortcodes (game → Discord; the reverse of Stage2Sanitizer's EmojiNamer pass) ---
+
+    [Theory]
+    [InlineData(DiscordTarget.Embed)]
+    [InlineData(DiscordTarget.PlainMessage)]
+    public void ForDiscord_restores_known_shortcodes_to_emoji(DiscordTarget target) =>
+        Assert.Equal("gg \U0001F602 \U0001F44D",
+            TextSanitizer.ForDiscord("gg :joy: :thumbsup:", 512, target));
+
+    [Fact]
+    public void ForDiscord_shortcodes_match_case_insensitively() =>
+        Assert.Equal("\U0001F602", TextSanitizer.ForDiscord(":JOY:", 512, DiscordTarget.PlainMessage));
+
+    /// <summary>
+    /// BMP symbols get a variation selector so Discord shows the colour emoji, not the
+    /// monochrome text glyph.
+    /// </summary>
+    [Fact]
+    public void ForDiscord_gives_bmp_symbols_their_emoji_presentation() =>
+        Assert.Equal("❤️", TextSanitizer.ForDiscord(":heart:", 512, DiscordTarget.PlainMessage));
+
+    [Fact]
+    public void ForDiscord_leaves_unknown_shortcodes_as_escaped_text() =>
+        Assert.Equal(@":not\_a\_thing:",
+            TextSanitizer.ForDiscord(":not_a_thing:", 512, DiscordTarget.PlainMessage));
+
+    [Fact]
+    public void ForDiscord_does_not_mistake_timestamps_for_shortcodes() =>
+        Assert.Equal("raid at 12:30:45 tonight",
+            TextSanitizer.ForDiscord("raid at 12:30:45 tonight", 512, DiscordTarget.PlainMessage));
+
+    /// <summary>
+    /// The rewrite is presentation-only: the dedupe hash must keep seeing the exact typed text,
+    /// so Normalize never touches shortcodes.
+    /// </summary>
+    [Fact]
+    public void Normalize_leaves_shortcodes_alone() =>
+        Assert.Equal("gg :joy:", TextSanitizer.Normalize("gg :joy:"));
+
+    /// <summary>
+    /// Both directions read from the same table, so a Discord emoji that lands in game as a
+    /// shortcode comes back to Discord as the identical emoji, and vice versa.
+    /// </summary>
+    [Theory]
+    [InlineData("\U0001F602", ":joy:")]          // 😂 — astral plane
+    [InlineData("❤️", ":heart:")]      // ❤️ — BMP symbol with VS16
+    [InlineData("\U0001F5E1️", ":dagger:")] // 🗡️ — astral but text-presentation by default
+    [InlineData("\U0001F6E1️", ":shield:")] // 🛡️ — same; VS16 must survive the round trip
+    public void Emoji_round_trip_is_exact(string emoji, string shortcode)
+    {
+        Assert.Equal(shortcode, EmojiNamer.Replace(emoji));
+        Assert.Equal(emoji, EmojiNamer.RestoreEmoji(shortcode));
+    }
+
     /// <summary>The plan's named case: a 5000-char payload survives, split across messages.</summary>
     [Theory]
     [InlineData(TextSanitizer.MaxDescriptionLength)]
