@@ -100,11 +100,11 @@ public sealed class NicknameTests
     }
 
     /// <summary>
-    /// The common case is a member with no nickname, so "no nickname" has to be cached as firmly as
+    /// The common case is a member with no nickname, so "no nickname" has to be stored as firmly as
     /// a nickname is — otherwise the feature would cost a lookup per message forever.
     /// </summary>
     [Fact]
-    public async Task A_speakers_answer_is_cached_across_messages()
+    public async Task A_speakers_answer_is_reused_across_messages()
     {
         using var app = new Stage2TestApp();
         var client = app.CreateAuthenticatedClient();
@@ -335,6 +335,107 @@ public sealed class NicknameTests
         Assert.Equal("Kaelen Vos", messages[0].GetProperty("author").GetString());
         Assert.Equal("@Oracle will we win tonight?", messages[0].GetProperty("text").GetString());
         Assert.Equal("Oracle", messages[1].GetProperty("author").GetString());
+    }
+
+    /// <summary>
+    /// The point of storing names in the state file rather than in memory: this app pool
+    /// idle-stops, and a nickname is a thing people change a handful of times a year. A cold start
+    /// that re-read every speaker would spend the feature's whole cost on an answer that had not
+    /// changed. Two apps over one state file is what a recycle looks like from here.
+    /// </summary>
+    [Fact]
+    public async Task Stored_names_survive_a_restart()
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"relay-nicknames-{Guid.NewGuid():N}.json");
+
+        var config = new Dictionary<string, string?> { ["Relay:StateFilePath"] = statePath };
+
+        try
+        {
+            using (var first = new Stage2TestApp(config))
+            {
+                var client = first.CreateAuthenticatedClient();
+
+                first.Bot.ScriptGuild(GuildId);
+                first.Bot.ScriptMember("9101", "Kaelen Vos");
+
+                await InitialiseAsync(first, client);
+
+                first.Bot.ScriptMessages(DiscordJson.User("101", "Bob", "first"));
+
+                using var body = await PollAsync(client);
+
+                Assert.Equal("Kaelen Vos", Author(body));
+            }
+
+            using var second = new Stage2TestApp(config);
+            var restarted = second.CreateAuthenticatedClient();
+
+            // Nothing scripted on the new app: a lookup would 404 and the name would fall back to
+            // the account name. The guild id is durable for the same reason, so that is not re-read
+            // either — the restarted relay asks Discord nothing at all. Spelled out rather than
+            // built by DiscordJson.User, which derives the author id from the message id; this has
+            // to be the SAME speaker as before the restart.
+            second.Bot.ScriptMessages(
+                "{\"id\":\"102\",\"content\":\"second\"," +
+                "\"author\":{\"id\":\"9101\",\"username\":\"Bob\",\"global_name\":\"Bob\"}," +
+                "\"timestamp\":\"2026-08-06T12:00:00+00:00\"}");
+
+            using var after = await PollAsync(restarted);
+
+            Assert.Equal("Kaelen Vos", Author(after));
+            Assert.Empty(second.Bot.NicknameRequests);
+        }
+        finally
+        {
+            File.Delete(statePath);
+        }
+    }
+
+    /// <summary>
+    /// A rename has to show up eventually, and an entry past the refresh window is what makes it:
+    /// the person's next message re-reads their name. A stamp in the FUTURE counts as past it too
+    /// — a clock correction or a state file from another host would otherwise pin the old name in
+    /// place for as long as the skew lasted.
+    /// </summary>
+    [Theory]
+    [InlineData(-48)]   // stale: read two days ago, the window is one
+    [InlineData(6)]     // skewed: stamped in the future
+    public async Task An_entry_outside_the_refresh_window_is_read_again(int hoursFromNow)
+    {
+        var statePath = Path.Combine(Path.GetTempPath(), $"relay-nickrefresh-{Guid.NewGuid():N}.json");
+        var stamp = DateTimeOffset.UtcNow.AddHours(hoursFromNow);
+
+        await File.WriteAllTextAsync(statePath,
+            $$"""
+              {"GuildId":"{{GuildId}}",
+               "Nicknames":[{"UserId":"9101","Nick":"Old Name","FetchedUtc":"{{stamp:O}}"}]}
+              """);
+
+        try
+        {
+            using var app = new Stage2TestApp(new Dictionary<string, string?>
+            {
+                ["Relay:StateFilePath"] = statePath
+            });
+
+            var client = app.CreateAuthenticatedClient();
+
+            app.Bot.ScriptMember("9101", "Kaelen Vos");
+
+            await InitialiseAsync(app, client);
+
+            app.Bot.ScriptMessages(DiscordJson.User("101", "Bob", "hello"));
+
+            using var body = await PollAsync(client);
+
+            Assert.Equal("Kaelen Vos", Author(body));
+            Assert.Equal("9101", Assert.Single(app.Bot.MemberLookups));
+        }
+        finally
+        {
+            File.Delete(statePath);
+        }
     }
 
     /// <summary>The kill switch: off means the lookups do not happen at all, not merely unused.</summary>

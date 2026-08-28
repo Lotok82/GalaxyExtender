@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Net;
 using System.Text.Json;
 using GalaxyExtender.Relay.Options;
@@ -17,9 +16,14 @@ namespace GalaxyExtender.Relay.Services;
 /// everything here exists to make that call rare:
 ///
 /// <list type="bullet">
-/// <item>results are cached in memory for <see cref="RelayOptions.NicknameCacheMinutes"/>, and a
-/// user with NO nickname is cached just as firmly as one with a nickname — otherwise the common
-/// case would pay for a lookup on every message;</item>
+/// <item>answers are kept in the STATE FILE (<see cref="RelayState.Nicknames"/>) and reused for
+/// <see cref="RelayOptions.NicknameRefreshHours"/> — a day — because renaming yourself in a Discord
+/// server is something people do a handful of times a year, and this pool idle-stops, so an
+/// in-memory cache would re-buy the same unchanged answer on every cold start. A user with NO
+/// nickname is stored just as firmly as one with a nickname: that is the common case, and
+/// re-asking about it would cost the most;</item>
+/// <item>refresh is lazy, per person, on their first message after their entry ages out — nobody
+/// who has not spoken is ever looked up, so the list costs nothing to hold;</item>
 /// <item>one round of lookups is capped at <see cref="MaxLookupsPerRound"/>, so a burst from many
 /// distinct authors cannot turn one fetch into fifty Discord calls;</item>
 /// <item>a failure that is not "this user is not a member" suppresses lookups entirely for
@@ -49,22 +53,17 @@ public sealed class GuildNicknames(
     private static readonly TimeSpan FailureBackoff = TimeSpan.FromMinutes(15);
 
     /// <summary>
-    /// Cached entries before a prune. Bounds a cache whose keys are guild members — thousands of
-    /// them over a long uptime, all of them tiny, none of them worth a real eviction policy.
+    /// Stored nicknames before the least recently refreshed are trimmed. Bounds a list whose keys
+    /// are guild members — thousands of them over years, all of them tiny — inside a state file
+    /// that is rewritten whole on every mutation, so its size is everyone's cost and not only this
+    /// feature's. Well above any guild that fits in a chat bridge; a trimmed entry costs one
+    /// lookup if that person ever speaks again.
     /// </summary>
-    private const int MaxCacheEntries = 512;
+    private const int MaxStoredNicknames = 500;
 
     /// <summary>The empty answer, for callers with nothing to resolve.</summary>
     public static readonly IReadOnlyDictionary<string, string> None =
         new Dictionary<string, string>(StringComparer.Ordinal);
-
-    /// <summary>
-    /// id -> what Discord last said, with when that expires. A null <see cref="CacheEntry.Nick"/>
-    /// is a real answer ("this member has no nickname"), not a miss.
-    /// </summary>
-    private sealed record CacheEntry(string? Nick, DateTimeOffset ExpiresUtc);
-
-    private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.Ordinal);
 
     private readonly object _gate = new();
     private DateTimeOffset _suppressedUntilUtc = DateTimeOffset.MinValue;
@@ -95,14 +94,20 @@ public sealed class GuildNicknames(
         }
 
         var now = DateTimeOffset.UtcNow;
+        var window = TimeSpan.FromHours(Math.Max(1, relayOptions.CurrentValue.NicknameRefreshHours));
         var resolved = new Dictionary<string, string>(StringComparer.Ordinal);
         var missing = new List<string>();
 
+        // One read of the state document for the whole round, rather than one per id.
+        var stored = store.Read(state => state.Nicknames
+            .Where(entry => wanted.Contains(entry.UserId))
+            .ToDictionary(entry => entry.UserId, entry => entry, StringComparer.Ordinal));
+
         foreach (var id in wanted)
         {
-            if (_cache.TryGetValue(id, out var cached) && cached.ExpiresUtc > now)
+            if (stored.TryGetValue(id, out var entry) && IsFresh(entry, now, window))
             {
-                if (cached.Nick is { Length: > 0 } nick)
+                if (entry.Nick is { Length: > 0 } nick)
                 {
                     resolved[id] = nick;
                 }
@@ -136,7 +141,7 @@ public sealed class GuildNicknames(
             missing.RemoveRange(MaxLookupsPerRound, missing.Count - MaxLookupsPerRound);
         }
 
-        var ttl = TimeSpan.FromMinutes(Math.Max(1, relayOptions.CurrentValue.NicknameCacheMinutes));
+        var read = new List<NicknameEntry>();
 
         foreach (var id in missing)
         {
@@ -148,12 +153,24 @@ public sealed class GuildNicknames(
                 break;
             }
 
-            Cache(id, nick, DateTimeOffset.UtcNow + ttl);
+            read.Add(new NicknameEntry
+            {
+                UserId = id,
+                Nick = nick,
+                FetchedUtc = DateTimeOffset.UtcNow
+            });
 
             if (nick is { Length: > 0 })
             {
                 resolved[id] = nick;
             }
+        }
+
+        // One state write for the round rather than one per lookup: the store rewrites the whole
+        // document on every mutation, and a busy fetch would otherwise pay for that ten times over.
+        if (read.Count > 0)
+        {
+            Store(read);
         }
 
         return resolved;
@@ -366,30 +383,41 @@ public sealed class GuildNicknames(
     }
 
     /// <summary>
-    /// Stores one answer, pruning first if the cache has grown past its bound: expired entries go,
-    /// and if that was not enough the whole thing goes. Dropping a live entry costs one lookup.
+    /// Is this stored answer still good? A stamp in the FUTURE says no, deliberately: a clock
+    /// correction, or a state file carried over from another host, would otherwise pin a name in
+    /// place for as long as the skew lasted with nothing to say why. Same reasoning as the alert
+    /// ping window, and the same recovery — read it again and re-stamp it.
     /// </summary>
-    private void Cache(string id, string? nick, DateTimeOffset expiresUtc)
+    private static bool IsFresh(NicknameEntry entry, DateTimeOffset now, TimeSpan window) =>
+        entry.FetchedUtc <= now && now - entry.FetchedUtc < window;
+
+    /// <summary>
+    /// Writes a round's answers through to the state file, replacing whatever was held for those
+    /// users, then trims the least recently refreshed back to <see cref="MaxStoredNicknames"/> —
+    /// the entries belonging to whoever has been quiet longest.
+    /// </summary>
+    private void Store(List<NicknameEntry> read)
     {
-        if (_cache.Count >= MaxCacheEntries)
+        store.Mutate<object?>(state =>
         {
-            var now = DateTimeOffset.UtcNow;
+            var ids = read.Select(entry => entry.UserId).ToHashSet(StringComparer.Ordinal);
 
-            foreach (var (key, entry) in _cache)
+            state.Nicknames.RemoveAll(entry => ids.Contains(entry.UserId));
+            state.Nicknames.AddRange(read);
+
+            if (state.Nicknames.Count > MaxStoredNicknames)
             {
-                if (entry.ExpiresUtc <= now)
-                {
-                    _cache.TryRemove(key, out _);
-                }
+                var keep = state.Nicknames
+                    .OrderByDescending(entry => entry.FetchedUtc)
+                    .Take(MaxStoredNicknames)
+                    .ToList();
+
+                state.Nicknames.Clear();
+                state.Nicknames.AddRange(keep);
             }
 
-            if (_cache.Count >= MaxCacheEntries)
-            {
-                _cache.Clear();
-            }
-        }
-
-        _cache[id] = new CacheEntry(nick, expiresUtc);
+            return null;
+        });
     }
 
     /// <summary>Ids worth asking about: non-blank, deduplicated, order preserved.</summary>

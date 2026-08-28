@@ -59,8 +59,8 @@ public sealed class DiscordOptions
     /// shown to the guild — and the guild recognises the nickname, which is why people set one.
     ///
     /// Costs one <c>GET /guilds/{guild}/members/{user}</c> per speaker per
-    /// <see cref="RelayOptions.NicknameCacheMinutes"/>; see <see cref="Services.GuildNicknames"/> for
-    /// how that is bounded. Turning it off is the kill switch if those calls ever become a problem;
+    /// <see cref="RelayOptions.NicknameRefreshHours"/> — a day, and only for people who actually
+    /// spoke; see <see cref="Services.GuildNicknames"/> for how that is bounded. Turning it off is the kill switch if those calls ever become a problem;
     /// nothing else changes, and names fall back to <c>global_name</c>.
     /// </summary>
     public bool NicknamesEnabled { get; set; } = true;
