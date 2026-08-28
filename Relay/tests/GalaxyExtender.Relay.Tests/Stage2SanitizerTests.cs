@@ -170,29 +170,56 @@ public sealed class Stage2SanitizerTests
     // --- author ---
 
     [Fact]
+    public void Author_prefers_the_server_nickname() =>
+        Assert.Equal("Kaelen", Stage2Sanitizer.SanitizeAuthor("Kaelen", "Zed", "zed_the_user"));
+
+    [Fact]
     public void Author_prefers_global_name() =>
-        Assert.Equal("Zed", Stage2Sanitizer.SanitizeAuthor("Zed", "zed_the_user"));
+        Assert.Equal("Zed", Stage2Sanitizer.SanitizeAuthor(null, "Zed", "zed_the_user"));
 
     [Fact]
     public void Author_falls_back_to_username() =>
-        Assert.Equal("zed_the_user", Stage2Sanitizer.SanitizeAuthor(null, "zed_the_user"));
+        Assert.Equal("zed_the_user", Stage2Sanitizer.SanitizeAuthor(null, null, "zed_the_user"));
+
+    /// <summary>
+    /// A nickname of nothing but zero-width characters is a name the game cannot show at all. The
+    /// speaker still has two names Discord knows them by, and either says more than "discord" —
+    /// which is why the cascade runs over the CLEANED forms, not the raw ones.
+    /// </summary>
+    [Fact]
+    public void Unrenderable_nickname_falls_through_to_the_account_name() =>
+        Assert.Equal("Zed", Stage2Sanitizer.SanitizeAuthor("​​", "Zed", "zed_the_user"));
 
     [Fact]
     public void Author_that_sanitizes_away_becomes_discord() =>
-        Assert.Equal("discord", Stage2Sanitizer.SanitizeAuthor("", null));
+        Assert.Equal("discord", Stage2Sanitizer.SanitizeAuthor(null, "", null));
 
     [Fact]
     public void Emoji_only_author_becomes_a_question_mark() =>
-        Assert.Equal("?", Stage2Sanitizer.SanitizeAuthor("\U0001F600", null));
+        Assert.Equal("?", Stage2Sanitizer.SanitizeAuthor(null, "\U0001F600", null));
 
     [Fact]
     public void Author_cannot_carry_sender_lookalike_characters() =>
-        Assert.Equal("Kaelen Discord Bob", Stage2Sanitizer.SanitizeAuthor("Kaelen: [Discord] Bob:", null));
+        Assert.Equal("Kaelen Discord Bob",
+            Stage2Sanitizer.SanitizeAuthor(null, "Kaelen: [Discord] Bob:", null));
+
+    [Fact]
+    public void Nickname_cannot_carry_sender_lookalike_characters_either() =>
+        Assert.Equal("Kaelen Discord Bob",
+            Stage2Sanitizer.SanitizeAuthor("Kaelen: [Discord] Bob:", "Zed", null));
 
     [Fact]
     public void Author_clamps_to_32()
     {
-        var result = Stage2Sanitizer.SanitizeAuthor(new string('n', 60), null);
+        var result = Stage2Sanitizer.SanitizeAuthor(null, new string('n', 60), null);
+
+        Assert.Equal(Stage2Sanitizer.MaxAuthorLength, result.Length);
+    }
+
+    [Fact]
+    public void Long_nickname_clamps_to_32()
+    {
+        var result = Stage2Sanitizer.SanitizeAuthor(new string('n', 60), "Zed", null);
 
         Assert.Equal(Stage2Sanitizer.MaxAuthorLength, result.Length);
     }
@@ -200,7 +227,7 @@ public sealed class Stage2SanitizerTests
     [Fact]
     public void Composed_line_fits_the_pinned_244_char_bound()
     {
-        var author = Stage2Sanitizer.SanitizeAuthor(new string('a', 100), null);
+        var author = Stage2Sanitizer.SanitizeAuthor(new string('a', 100), null, null);
         var text = Text(new string('x', 500));
 
         Assert.True(Stage2Queue.ComposeInjectedBody(author, text).Length <= 244);

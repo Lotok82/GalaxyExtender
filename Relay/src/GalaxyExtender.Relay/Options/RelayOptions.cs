@@ -80,6 +80,15 @@ public sealed class RelayOptions
     public double Stage2FetchCacheSeconds { get; set; } = 2.5;
 
     /// <summary>
+    /// How long a speaker's server nickname is reused before Discord is asked again
+    /// (<c>Discord:NicknamesEnabled</c>). An hour, because a nickname is a thing people change
+    /// occasionally and deliberately, not per message — and the whole cost of the feature is
+    /// proportional to how often this expires. A rename shows up in the guild room within it.
+    /// In-memory only: a recycle costs one lookup per speaker, nothing more.
+    /// </summary>
+    public int NicknameCacheMinutes { get; set; } = 60;
+
+    /// <summary>
     /// Minimum gap between world boss alert role pings (<c>Discord:AlertRoleId</c>). Alerts inside
     /// the window still publish, just without notifying anyone — the limit is on the ping, never on
     /// the alert.

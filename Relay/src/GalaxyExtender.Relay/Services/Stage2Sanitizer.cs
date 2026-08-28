@@ -28,20 +28,36 @@ public static class Stage2Sanitizer
     private const char Unrenderable = '\0';
 
     /// <summary>
-    /// The injected author prefix. Discord's display name (<c>global_name</c>) preferred,
-    /// username fallback (R2 finding); sanitized like text, plus <c>:</c>/<c>[</c>/<c>]</c>
-    /// removed so the author cannot make the injected body look like a different sender or a
-    /// nested marker. Never empty — an author that sanitizes away becomes "discord".
+    /// The injected author prefix, in the order the guild recognises people by: the speaker's
+    /// SERVER nickname (<see cref="GuildNicknames"/>, absent whenever they have not set one or the
+    /// lookup did not happen), then Discord's account display name (<c>global_name</c>), then the
+    /// <c>username</c> fallback (R2 finding).
+    ///
+    /// The cascade is over the CLEANED forms, not the raw ones: a nickname made entirely of
+    /// characters the game cannot render sanitizes to nothing, and falling through to the next
+    /// name says more than the "discord" placeholder would. Sanitized like text, plus
+    /// <c>:</c>/<c>[</c>/<c>]</c> removed so the author cannot make the injected body look like a
+    /// different sender or a nested marker. Never empty — an author with nothing left to show
+    /// becomes "discord".
     /// </summary>
-    public static string SanitizeAuthor(string? globalName, string? username)
+    public static string SanitizeAuthor(string? nickname, string? globalName, string? username)
     {
-        var name = !string.IsNullOrWhiteSpace(globalName) ? globalName
-            : !string.IsNullOrWhiteSpace(username) ? username
-            : string.Empty;
+        foreach (var candidate in new[] { nickname, globalName, username })
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
+            {
+                continue;
+            }
 
-        var cleaned = Clean(name, MaxAuthorLength, stripSenderLookalikes: true);
+            var cleaned = Clean(candidate, MaxAuthorLength, stripSenderLookalikes: true);
 
-        return cleaned.Length == 0 ? "discord" : cleaned;
+            if (cleaned.Length > 0)
+            {
+                return cleaned;
+            }
+        }
+
+        return "discord";
     }
 
     /// <summary>
