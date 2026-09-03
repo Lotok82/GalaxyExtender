@@ -6,7 +6,7 @@ this file is the operational reference and the wire contract the C++ side codes 
 
 - **Target:** `net8.0`, ASP.NET Core minimal API
 - **Host:** IIS shared hosting (Plesk), in-process (`AspNetCoreModuleV2`), dedicated app pool, 1 worker process
-- **Live at:** `https://example.invalid/relay` — subfolder registered as an IIS application
+- **Deployed as:** a `/relay` subfolder registered as an IIS application (the live address is operator config, not recorded here)
 - **Status:** **All phases complete — forwarding AND the Stage 2 read path (R3–R7) are implemented.** `POST /api/v1/chat` authenticates, validates, **de-duplicates across clients** (occurrence-aware, durable state in `App_Data/relay-state.json`) and **forwards to the Discord webhook** with the `allowed_mentions` lockdown; failures land in a durable outbox drained by later requests or `POST /api/v1/heartbeat`. The response header `X-Relay-Forwarding` reads `enabled`; an unconfigured webhook answers `503`. `GET /api/v1/messages` serves the pinned Stage 2 claim contract for real when `Discord:BotToken` + `Discord:ChannelId` + `Discord:Stage2Enabled` are configured (on-demand channel fetch, echo filter, sanitizer, claim/redelivery/ack store) and answers empty + `X-Relay-Stage2: disabled` otherwise. Marked lines (`[Discord] …` after the sender prefix) arriving on `/chat` are the Stage 2 delivery ack — matched exact-first-then-mask-tolerant, counted as `accepted`, and **never forwarded to Discord**. `POST /api/v1/presence` records which extension clients are alive, and with `Discord:CommandsEnabled` the bot answers a `status` mention in the channel with how many clients are online (R11 — see [Bot commands and presence](#bot-commands-and-presence-r11)). A [background ticker](#background-ticker-r12) (R12) runs the outbox drain, the cleanup sweep and the command scan on a timer, so all three still happen with nobody in game — the case where the bot most needs to answer; measured surviving shared IIS without the self-ping. Guild chat now posts as a **plain message** rather than an embed, and with `Discord:AlertsEnabled` a line beginning with a configured tag posts as a coloured embed instead — see [World boss alerts](#world-boss-alerts). 259 tests. Remaining: Phase 6 (post-deploy hardening checks).
 
 Verified on the host 2026-08-05: .NET 8.0.29 / Windows Server 2019, outbound to discord.com reachable (200 in 194 ms), `App_Data` writable, `process.id` stable across 4 minutes, `isHttps` reported correctly so `RequireHttps` is enabled.
@@ -424,7 +424,7 @@ including overnight, with `lastError: null` and `selfPing: false`. On **2026-09-
 reporting that the bot had stopped answering whenever nobody was in game, `/health` answered
 `uptimeSeconds` 136 and `ticks` 2 — the pool had been stopped, and the request that woke it was the
 one asking. This host idle-stops the worker now, so `Relay:SelfPingUrl` **is** configured here,
-pointed at `https://example.invalid/relay/api/v1/health`. Re-read this before trusting either
+pointed at the relay's own `/api/v1/health`. Re-read this before trusting either
 answer: it is a host behaviour, and it has already moved once without notice.
 
 **The keep-alive only keeps a *running* pool running.** Nothing in the process can start a stopped

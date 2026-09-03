@@ -3,7 +3,7 @@
 Status: **All phases built and deployed; the full bridge is live in both directions (2026-08-06).** Stage 1 forwarding (game → Discord) confirmed 2026-08-05; the Stage 2 read path (R3–R7, Discord → game, 143 tests) deployed and confirmed end-to-end with multiple users 2026-08-06 — see [discord-stage2-plan.md](discord-stage2-plan.md). Remaining here: the Phase 6 durability checks below (state file survives recycle/redeploy, `stdoutLogEnabled` off), R8 poll-load sanity, and the optional R9/R10 bot work from the Stage 2 plan.
 Last updated: 2026-08-05
 
-Deployed at `https://example.invalid/relay` (subfolder registered as an IIS application). Confirmed from `/api/v1/health` on 2026-08-05:
+Deployed as a `/relay` subfolder registered as an IIS application (the live address is operator config, not recorded here). Confirmed from `/api/v1/health` on 2026-08-05:
 
 | Fact | Value |
 |---|---|
