@@ -353,10 +353,13 @@ what's adjustable — change things only if you have a reason to.</p>
       <td>How often the relay does its background round (retry waiting posts, tidy the
       channel, answer the bot) even with nobody in game. <code>0</code> switches the round
       off entirely.</td></tr>
-  <tr><td><code>SelfPingUrl</code></td><td>(blank)</td>
-      <td>A web address the relay visits once per round to keep itself awake — only needed
-      on hosting that puts idle apps to sleep. Point it at the relay's own health page.
-      Leave blank otherwise.</td></tr>
+  <tr><td><code>SelfPingUrl</code></td><td>the health page</td>
+      <td>A web address the relay visits once per round to keep itself awake, needed on
+      hosting that puts idle apps to sleep. This host does, so it is filled in here
+      (<code>https://example.invalid/relay/api/v1/health</code>) — without it the
+      relay nods off when nobody is in game and the bot stops answering. It only keeps a
+      <em>running</em> relay awake: to wake a sleeping one, have an uptime monitor visit
+      the same health page every few minutes.</td></tr>
 </table>
 
 <h2>Checking it's working</h2>

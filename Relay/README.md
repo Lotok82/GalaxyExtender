@@ -108,7 +108,7 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Relay:PresenceRetentionDays` | `7` | How long a silent client still counts as "known" (the connected-count denominator). |
 | `Relay:PresenceMaxClients` | `200` | Hard cap on the presence roster. |
 | `Relay:BackgroundTickSeconds` | `60` | Interval for the background ticker below. `0` disables it and everything reverts to running on request traffic only. Clamped to 1 s–1 h. |
-| `Relay:SelfPingUrl` | — | Optional absolute `http(s)` URL the ticker GETs once per tick, to stop IIS idle-stopping the pool. Point it at this relay's own `/api/v1/health`. Off by default — see below for how to tell whether you need it, and check `backgroundTicker.selfPingError` on `/health` once set. |
+| `Relay:SelfPingUrl` | — | Optional absolute `http(s)` URL the ticker GETs once per tick, to stop IIS idle-stopping the pool. Point it at this relay's own `/api/v1/health`. Off by default, but **set on this host** since 2026-09-03 — the pool idle-stops. See below for how to tell, and check `backgroundTicker.selfPingError` on `/health` once set. |
 
 ### World boss alerts
 
@@ -418,11 +418,26 @@ night means the pool idle-stopped and killed the ticker** — turn on `SelfPingU
 pool's idle timeout to 0 if the control panel allows it. Ticks climbing steadily through the small
 hours means shared hosting is tolerating it and nothing more is needed.
 
-**Measured on this host 2026-08-10, and the answer is that it survives: `ticks` 802 against
-`uptimeSeconds` 48216 — 803 expected at the 60 s interval, so no gaps across 13.4 hours including
-overnight — with `lastError: null` and `selfPing: false`.** The pool is not idle-stopping the
-worker, and `SelfPingUrl` is **not needed here**. Keep the check in mind if the hosting plan or app
-pool configuration ever changes, but do not configure the keep-alive on spec.
+**Measured twice on this host, and the answer changed.** On 2026-08-10 it survived: `ticks` 802
+against `uptimeSeconds` 48216 — 803 expected at the 60 s interval, so no gaps across 13.4 hours
+including overnight, with `lastError: null` and `selfPing: false`. On **2026-09-03**, with the guild
+reporting that the bot had stopped answering whenever nobody was in game, `/health` answered
+`uptimeSeconds` 136 and `ticks` 2 — the pool had been stopped, and the request that woke it was the
+one asking. This host idle-stops the worker now, so `Relay:SelfPingUrl` **is** configured here,
+pointed at `https://example.invalid/relay/api/v1/health`. Re-read this before trusting either
+answer: it is a host behaviour, and it has already moved once without notice.
+
+**The keep-alive only keeps a *running* pool running.** Nothing in the process can start a stopped
+one — after an app-pool recycle during a quiet spell the relay stays dark until some inbound request
+arrives, and with the guild asleep the first one can be hours away. That is what an **external**
+pinger is for: any uptime monitor GETting `/api/v1/health` (public, no key, no outbound work) every
+few minutes both revives a stopped pool and makes the idle timer moot. The self-ping is the cheap
+half of the answer; the external ping is the half that recovers.
+
+Why the silence outlasts the outage: a mention older than `Relay:CommandMaxAgeSeconds` (5 min) is
+deliberately never answered, so an `@bot status` typed into a dark channel gets no reply even when a
+player logs in and wakes the relay twenty minutes later. The symptom is not "the bot is slow" but
+"the bot never replies", which reads as a far bigger fault than the stopped timer behind it.
 
 `lastError` and `selfPingError` mean opposite things and are kept apart on purpose: the first says
 the relay's own work is failing, the second says the keep-alive is failing and the ticker may be
