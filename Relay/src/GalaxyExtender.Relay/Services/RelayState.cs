@@ -89,6 +89,26 @@ public sealed class RelayState
     public string? BotUserName { get; set; }
 
     /// <summary>
+    /// The guild the bridge channel belongs to, discovered once from <c>GET /channels/{id}</c> so
+    /// that per-server nicknames can be read. Cached durably for the same reason as
+    /// <see cref="BotUserId"/>: it cannot change unless the channel id does, so paying for the
+    /// lookup more than once would be paying for nothing. Overridable with <c>Discord:GuildId</c>,
+    /// which then takes precedence over this.
+    /// </summary>
+    public string? GuildId { get; set; }
+
+    /// <summary>
+    /// Server nicknames the relay has read, so the guild room can name people the way the guild
+    /// knows them without asking Discord about the same person twice.
+    ///
+    /// Durable rather than in-memory precisely because a nickname is a thing people change a
+    /// handful of times a year: this app pool idle-stops, and an in-memory cache would re-read
+    /// every speaker after each cold start — paying, over and over, for an answer that had not
+    /// changed. See <see cref="GuildNicknames"/> for the refresh window and the size bound.
+    /// </summary>
+    public List<NicknameEntry> Nicknames { get; set; } = [];
+
+    /// <summary>
     /// When the bot last told the channel that a message was not going to reach the guild room as
     /// posted. Durable so a recycle cannot turn one notice into one per app start, and rate-limited
     /// by <see cref="RelayOptions.DeliveryNoticeIntervalMinutes"/>.
@@ -114,6 +134,27 @@ public sealed class RelayState
     /// by the bot's status reply.
     /// </summary>
     public DateTimeOffset? LastAlertUtc { get; set; }
+}
+
+/// <summary>
+/// One Discord user's server nickname, as it stood when it was read. A null <see cref="Nick"/> is
+/// a real answer — "this member has no nickname" — and is kept just as firmly as a name, because
+/// having none is the common case and re-asking about it would cost the most.
+/// </summary>
+public sealed class NicknameEntry
+{
+    /// <summary>The Discord user id this is about.</summary>
+    public string UserId { get; set; } = string.Empty;
+
+    /// <summary>Their nickname in the bridge channel's guild, or null if they have none.</summary>
+    public string? Nick { get; set; }
+
+    /// <summary>
+    /// When Discord was asked. The refresh window runs from here, and it doubles as the eviction
+    /// key when the list is trimmed — the least recently refreshed entry belongs to whoever has
+    /// been quiet longest.
+    /// </summary>
+    public DateTimeOffset FetchedUtc { get; set; }
 }
 
 /// <summary>

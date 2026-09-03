@@ -71,7 +71,7 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Relay:MaxLinesPerBatch` | `50` | Rejected above this. |
 | `Relay:MaxLineLength` | `512` | Per-line clamp. |
 | `Relay:ApiKeys` | `{}` | `label -> secret`. See [API keys](#api-keys). |
-| `Relay:StateFilePath` | `App_Data/relay-state.json` | Durable state document (dedupe window, batch ids, outbox). Overridable mainly for tests. |
+| `Relay:StateFilePath` | `App_Data/relay-state.json` | Durable state document (dedupe window, batch ids, outbox, stored nicknames). Overridable mainly for tests. |
 | `Relay:OutboxMaxEntries` | `200` | Undelivered payloads kept at most; oldest dropped beyond it. |
 | `Relay:OutboxMaxAttempts` | `10` | Delivery attempts before an outbox entry is dropped (error-logged). |
 | `Discord:WebhookUrl` | — | Live credential. Must be an absolute `https://` URL or the relay reports unconfigured and answers `503`. |
@@ -90,6 +90,9 @@ Bound from the `Relay` and `Discord` sections. **Never put real values in `appse
 | `Relay:Stage2MaxPending` | `50` | Pending queue cap; oldest dropped (counted) beyond it. |
 | `Relay:Stage2MaxPerPoll` | `5` | Messages claimed per poll. |
 | `Relay:Stage2FetchCacheSeconds` | `2.5` | Discord fetch freshness window — polls inside it skip the Discord call. |
+| `Discord:NicknamesEnabled` | `true` | Show each speaker's **server nickname** on injected lines rather than their Discord account display name. On by default, unlike the other switches here: it changes only which of a person's own names the guild sees, not whether the relay authors anything. Costs one member read per speaker per `Relay:NicknameRefreshHours`. |
+| `Discord:GuildId` | — | Override for the bridge channel's guild, used by the nickname reads. Normally left empty: it is discovered once from `GET /channels/{id}` and cached in durable state, like `Discord:BotUserId`. |
+| `Relay:NicknameRefreshHours` | `24` | How long a stored nickname is reused before that person is read again. The names live in the state document, so this survives recycles; a rename shows up on that person's first message after their entry ages out. |
 | `Discord:CleanupEnabled` | `false` | Operator switch for the channel-history cleanup below. Off by default — deleting history must be an explicit decision, never a side effect of a deploy. |
 | `Relay:CleanupMaxAgeHours` | `5` | Bridge-channel messages older than this are deleted; pinned messages always survive. |
 | `Relay:CleanupIntervalMinutes` | `15` | Minimum time between cleanup sweeps. |
@@ -650,6 +653,20 @@ trusted beyond that.
   not an empty guild. (What *can* still lose a waiting message: the R10 channel tidy-up deleting
   it from Discord first, or a backlog beyond the 50-message fetch/queue caps. The bot says so —
   see [Bot commands and presence](#bot-commands-and-presence-r11).)
+- `author` is the name the guild recognises, in this order: the speaker's **server nickname** in
+  the bridge channel's guild, then Discord's account-level display name (`global_name`), then
+  their `username`, then `discord` if nothing survives sanitizing. The nickname is not in the
+  message payload — `member.nick` rides along with gateway events and the relay polls REST — so it
+  costs a `GET /guilds/{guild}/members/{user}` per speaker. Answers are kept in the **state
+  document** and reused for `Relay:NicknameRefreshHours` (24), with "this person has no nickname"
+  stored just as firmly — durable rather than in-memory because renaming yourself in a Discord
+  server happens a few times a year while this app pool idle-stops, so an in-memory cache would
+  re-buy the same unchanged answer every cold start. Refresh is lazy and per person, on their first
+  message after their entry ages out: nobody who has not spoken is ever looked up. A capped 10
+  lookups per fetch, a 15-minute pause after any failure that is not a plain 404, and a fall back to
+  the account name on every failure path: nothing about the lookup can keep a message out of the
+  guild room. Turn the whole thing off with `Discord:NicknamesEnabled=false`. `<@id>` mentions
+  inside `text` resolve through the same names.
 - `text` is pre-sanitized by the relay (R5: mentions/emoji resolved, newlines collapsed, SWG
   escapes stripped — the Core3 server does not strip `\#` colour codes itself) and pre-clamped:
   `author` ≤ 32 chars, `text` ≤ 200 chars, so the full injected line

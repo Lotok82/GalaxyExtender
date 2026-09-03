@@ -7,6 +7,9 @@ namespace GalaxyExtender.Relay.Tests;
 /// Stands in for Discord's channel-messages REST endpoint (the Stage 2 bot read). Returns an
 /// empty message array unless a response has been scripted, and records every request URI so
 /// tests can assert cursor behaviour (<c>limit=1</c> on first run, <c>after=</c> thereafter).
+///
+/// Also stands in for the nickname reads, but as a separate conversation with its own scripts and
+/// its own record — see the fields for why.
 /// </summary>
 public sealed class FakeDiscordBotHandler : HttpMessageHandler
 {
@@ -15,6 +18,17 @@ public sealed class FakeDiscordBotHandler : HttpMessageHandler
     private readonly object _lock = new();
     private readonly Queue<Func<HttpResponseMessage>> _scripted = new();
     private readonly List<RecordedRequest> _requests = [];
+
+    // The nickname reads (GET channels/{id} for the guild, GET guilds/{g}/members/{u} for the
+    // member) are answered from their OWN scripts and recorded in their OWN list, deliberately
+    // apart from the ordered queue above. Two reasons: the queue is positional, so letting a
+    // lookup dequeue a response scripted for a message fetch would make every test's scripting
+    // depend on what the nickname cache happened to hold; and the counts tests assert on are
+    // about the channel conversation, which a lookup is not part of. Unscripted lookups answer
+    // 404 — the relay's "no nickname here", which is what most tests want to see it fall back to.
+    private readonly List<RecordedRequest> _nicknameRequests = [];
+    private readonly Dictionary<string, Func<HttpResponseMessage>> _members = new(StringComparer.Ordinal);
+    private string? _guildId;
 
     public IReadOnlyList<string> RequestUris
     {
@@ -46,6 +60,72 @@ public sealed class FakeDiscordBotHandler : HttpMessageHandler
             {
                 return _requests.Count;
             }
+        }
+    }
+
+    /// <summary>Every guild/member lookup made, in order — the nickname path's own record.</summary>
+    public IReadOnlyList<RecordedRequest> NicknameRequests
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _nicknameRequests.ToArray();
+            }
+        }
+    }
+
+    /// <summary>Member lookups only, as the user ids they asked about.</summary>
+    public IReadOnlyList<string> MemberLookups
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _nicknameRequests
+                    .Where(r => r.Uri.Contains("/members/", StringComparison.Ordinal))
+                    .Select(r => r.Uri[(r.Uri.LastIndexOf('/') + 1)..])
+                    .ToArray();
+            }
+        }
+    }
+
+    /// <summary>Makes the bridge channel report a guild, so nickname lookups can proceed.</summary>
+    public void ScriptGuild(string guildId)
+    {
+        lock (_lock)
+        {
+            _guildId = guildId;
+        }
+    }
+
+    /// <summary>
+    /// Answers this user's member lookup: <paramref name="nick"/> null means a member with no
+    /// nickname (a 200 carrying no <c>nick</c>), which is a real answer and not a miss. Users left
+    /// unscripted get a 404 — Discord's "not a member of this guild".
+    /// </summary>
+    public void ScriptMember(string userId, string? nick)
+    {
+        var json = nick is null
+            ? "{\"user\":{\"id\":\"" + userId + "\"}}"
+            : "{\"user\":{\"id\":\"" + userId + "\"},\"nick\":" +
+              System.Text.Json.JsonSerializer.Serialize(nick) + "}";
+
+        ScriptMemberResponse(userId, () => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        });
+    }
+
+    /// <summary>Answers this user's member lookup with a bare status — a 403 or a 429.</summary>
+    public void ScriptMemberStatus(string userId, HttpStatusCode statusCode) =>
+        ScriptMemberResponse(userId, () => new HttpResponseMessage(statusCode));
+
+    private void ScriptMemberResponse(string userId, Func<HttpResponseMessage> response)
+    {
+        lock (_lock)
+        {
+            _members[userId] = response;
         }
     }
 
@@ -83,10 +163,44 @@ public sealed class FakeDiscordBotHandler : HttpMessageHandler
             ? null
             : await request.Content.ReadAsStringAsync(cancellationToken);
 
+        var uri = request.RequestUri?.ToString() ?? string.Empty;
+        var path = request.RequestUri?.AbsolutePath ?? string.Empty;
+
+        // "channels/{id}" with nothing after it is the guild-id read; anything deeper
+        // ("channels/{id}/messages...") is the channel conversation.
+        var isGuildRead = request.Method == HttpMethod.Get &&
+                          path.Contains("/channels/", StringComparison.Ordinal) &&
+                          !path.Contains("/messages", StringComparison.Ordinal);
+
+        var isMemberRead = request.Method == HttpMethod.Get &&
+                           path.Contains("/members/", StringComparison.Ordinal);
+
         lock (_lock)
         {
-            _requests.Add(new RecordedRequest(
-                request.Method.Method, request.RequestUri?.ToString() ?? string.Empty, body));
+            if (isGuildRead || isMemberRead)
+            {
+                _nicknameRequests.Add(new RecordedRequest(request.Method.Method, uri, body));
+
+                if (isGuildRead)
+                {
+                    return _guildId is null
+                        ? new HttpResponseMessage(HttpStatusCode.NotFound)
+                        : new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(
+                                $"{{\"id\":\"111222333444555666\",\"guild_id\":\"{_guildId}\"}}",
+                                Encoding.UTF8, "application/json")
+                        };
+                }
+
+                var userId = path[(path.LastIndexOf('/') + 1)..];
+
+                return _members.TryGetValue(userId, out var member)
+                    ? member()
+                    : new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            _requests.Add(new RecordedRequest(request.Method.Method, uri, body));
 
             return _scripted.Count > 0
                 ? _scripted.Dequeue()()

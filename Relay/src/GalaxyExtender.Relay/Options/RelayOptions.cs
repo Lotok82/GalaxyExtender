@@ -80,6 +80,19 @@ public sealed class RelayOptions
     public double Stage2FetchCacheSeconds { get; set; } = 2.5;
 
     /// <summary>
+    /// How long a stored server nickname is reused before Discord is asked about that person again
+    /// (<c>Discord:NicknamesEnabled</c>). A day, because renaming yourself in a Discord server is
+    /// something people do a handful of times a year — so this is the interval at which the whole
+    /// feature costs anything at all: one member read per person who SPOKE since their entry aged
+    /// out, and nothing whatsoever for anyone who did not.
+    ///
+    /// The names themselves live in the state file (<see cref="RelayState.Nicknames"/>), so the
+    /// window survives recycles and the answer is not re-bought every cold start. A rename shows
+    /// up in the guild room on that person's first message after their entry expires.
+    /// </summary>
+    public int NicknameRefreshHours { get; set; } = 24;
+
+    /// <summary>
     /// Minimum gap between world boss alert role pings (<c>Discord:AlertRoleId</c>). Alerts inside
     /// the window still publish, just without notifying anyone — the limit is on the ping, never on
     /// the alert.

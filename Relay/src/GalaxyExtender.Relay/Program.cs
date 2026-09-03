@@ -85,6 +85,9 @@ builder.Services.AddSingleton<DiscordPublisher>();
 builder.Services.AddSingleton<Outbox>();
 
 // Stage 2 read path (R3-R7): on-demand channel fetch and the claim/ack work queue.
+// GuildNicknames is a singleton for its CACHE, not for its dependencies: a per-request instance
+// would look every speaker up again on every poll.
+builder.Services.AddSingleton<GuildNicknames>();
 builder.Services.AddSingleton<DiscordReader>();
 builder.Services.AddSingleton<Stage2Queue>();
 

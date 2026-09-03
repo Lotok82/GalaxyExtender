@@ -41,6 +41,7 @@ public sealed class BotCommandScanner(
     IOptionsMonitor<RelayOptions> relayOptions,
     IStateStore store,
     PresenceTracker presence,
+    GuildNicknames nicknames,
     ILogger<BotCommandScanner> logger)
 {
     /// <summary>Most messages examined per scan. Discord's own maximum per read is 100.</summary>
@@ -247,8 +248,9 @@ public sealed class BotCommandScanner(
 
                 if (command == BotCommands.BotCommand.EightBall)
                 {
-                    EnqueueExchange(message, reply: null, answer: null,
-                        botUserId, current, relay, presenceNow, now);
+                    EnqueueExchange(message, reply: null, answer: null, botUserId,
+                        await nicknames.ResolveAsync(GuildNicknames.IdsIn(message)),
+                        current, relay, presenceNow, now);
                 }
 
                 continue;
@@ -285,7 +287,9 @@ public sealed class BotCommandScanner(
             {
                 // Reply or no reply: the reader suppressed the question because this scan owns
                 // its delivery, so the queueing decision cannot hinge on the POST landing.
-                EnqueueExchange(message, reply, content, botUserId, current, relay, presenceNow, now);
+                EnqueueExchange(message, reply, content, botUserId,
+                    await nicknames.ResolveAsync(GuildNicknames.IdsIn(message)),
+                    current, relay, presenceNow, now);
             }
 
             if (reply is null)
@@ -335,6 +339,7 @@ public sealed class BotCommandScanner(
     /// </summary>
     private void EnqueueExchange(
         DiscordMessage message, BotReply? reply, string? answer, string botUserId,
+        IReadOnlyDictionary<string, string> nicknamesById,
         DiscordOptions discord, RelayOptions relay, PresenceSnapshot presenceNow, DateTimeOffset now)
     {
         var answered = reply is not null && answer is not null;
@@ -348,7 +353,7 @@ public sealed class BotCommandScanner(
         // token resolved to @BotName, so the guild room sees who was being asked; the answer's
         // typography (em dashes and the like) folds to what the game font renders.
         var question = Stage2Sanitizer.SanitizeText(
-            message.Content, message.MentionNames,
+            message.Content, GuildNicknames.Merge(message.MentionNames, nicknamesById),
             message.HasAttachments, message.HasEmbeds, message.HasStickers);
 
         var fortune = answered
@@ -372,7 +377,9 @@ public sealed class BotCommandScanner(
                 entries.Add(new PendingEntry
                 {
                     Id = message.Id,
-                    Author = Stage2Sanitizer.SanitizeAuthor(message.GlobalName, message.Username),
+                    Author = Stage2Sanitizer.SanitizeAuthor(
+                        nicknamesById.GetValueOrDefault(message.AuthorId ?? string.Empty),
+                        message.GlobalName, message.Username),
                     Text = question,
                     TimestampUtc = message.TimestampUtc,
                     ReceivedUtc = now
@@ -385,6 +392,7 @@ public sealed class BotCommandScanner(
                 // one in: Discord reports it on the reply we just posted, then the question's
                 // mention entry, then the name users/@me reported when the id was discovered.
                 var botName = Stage2Sanitizer.SanitizeAuthor(
+                    nicknamesById.GetValueOrDefault(botUserId),
                     reply!.Author.Length > 0
                         ? reply.Author
                         : message.MentionNames.GetValueOrDefault(botUserId) ?? state.BotUserName,

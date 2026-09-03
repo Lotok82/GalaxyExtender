@@ -222,6 +222,19 @@ next alert can ping rather than being kept quiet on account of one nobody ever s
     Purely for troubleshooting; leave off day to day.</td>
   </tr>
   <tr>
+    <td><code>Discord__NicknamesEnabled</code></td><td>on</td>
+    <td>Shows each person by the nickname they use <em>in your Discord server</em>, rather than
+    their Discord account name. On by default — it is how the guild recognises each other. Off
+    falls back to the account display name. The bot needs to be able to see the server's members
+    (being invited to the server is enough). Names are remembered on disk and re-checked about
+    once a day, so this costs Discord almost nothing day to day.</td>
+  </tr>
+  <tr>
+    <td><code>Discord__GuildId</code></td><td>(blank)</td>
+    <td>Your Discord server's ID, used for the nicknames above. Leave blank — the relay works it
+    out from the bridge channel by itself.</td>
+  </tr>
+  <tr>
     <td><code>Discord__BotUserId</code></td><td>(blank)</td>
     <td>The bot's own ID. Leave blank — the relay looks it up by itself. A wrong value here
     makes the bot ignore everyone.</td>
@@ -290,6 +303,10 @@ what's adjustable — change things only if you have a reason to.</p>
   <tr><td><code>Stage2FetchCacheSeconds</code></td><td>2.5</td>
       <td>How long a look at the Discord channel is reused before looking again, so many
       players online doesn't mean many calls to Discord.</td></tr>
+  <tr><td><code>NicknameRefreshHours</code></td><td>24</td>
+      <td>How long someone's server nickname is remembered before the relay asks Discord again.
+      Names are remembered on disk, so a restart doesn't forget them. Somebody who renames
+      themselves shows up under the new name on their first message after a day has passed.</td></tr>
 </table>
 
 <h3>Channel tidy-up</h3>

@@ -24,6 +24,7 @@ public sealed class DiscordReader(
     IOptionsMonitor<RelayOptions> relayOptions,
     IStateStore store,
     BotCommandScanner commands,
+    GuildNicknames nicknames,
     ILogger<DiscordReader> logger)
 {
     public const string HttpClientName = "discord-bot";
@@ -169,6 +170,16 @@ public sealed class DiscordReader(
 
         var mentionSuppressed = false;
 
+        // Server nicknames for everyone this page names — speakers and mentioned users alike —
+        // resolved BEFORE the store lock, because the lookups are HTTP and the mutate is not a
+        // place to be doing HTTP. Empty whenever the feature is off, unavailable, or already
+        // cached as "nobody here has one"; the sanitizer falls back to the account name per id.
+        // Nothing is queued on the first run, so nothing is worth looking up on it either.
+        var nicknamesById = initialising
+            ? GuildNicknames.None
+            : await nicknames.ResolveAsync(GuildNicknames.IdsIn(
+                fetched.Where(message => !message.FromBotOrWebhook)));
+
         var enqueued = store.Mutate(state =>
         {
             state.Stage2Cursor = newCursor;
@@ -203,7 +214,7 @@ public sealed class DiscordReader(
                 }
 
                 var text = Stage2Sanitizer.SanitizeText(
-                    message.Content, message.MentionNames,
+                    message.Content, GuildNicknames.Merge(message.MentionNames, nicknamesById),
                     message.HasAttachments, message.HasEmbeds, message.HasStickers);
 
                 if (text.Length == 0)
@@ -214,7 +225,9 @@ public sealed class DiscordReader(
                 entries.Add(new PendingEntry
                 {
                     Id = message.Id,
-                    Author = Stage2Sanitizer.SanitizeAuthor(message.GlobalName, message.Username),
+                    Author = Stage2Sanitizer.SanitizeAuthor(
+                        nicknamesById.GetValueOrDefault(message.AuthorId ?? string.Empty),
+                        message.GlobalName, message.Username),
                     Text = text,
                     TimestampUtc = message.TimestampUtc,
                     ReceivedUtc = now
