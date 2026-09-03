@@ -269,7 +269,7 @@ public sealed class AlertTests
     [Fact]
     public async Task An_alert_pings_the_configured_role()
     {
-        using var app = AppWithAlerts(("Discord:AlertRoleId", "1236350866370465793"));
+        using var app = AppWithAlerts(("Discord:AlertRoleId", "999888777666555444"));
 
         await app.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat",
             Batch("kaelen", ChatBatches.Line("[PvP World Boss] Bloodfin has spawned!")));
@@ -277,8 +277,8 @@ public sealed class AlertTests
         var payload = Single(app);
         var mentions = payload.GetProperty("allowed_mentions");
 
-        Assert.Equal("<@&1236350866370465793>", payload.GetProperty("content").GetString());
-        Assert.Equal("1236350866370465793", mentions.GetProperty("roles")[0].GetString());
+        Assert.Equal("<@&999888777666555444>", payload.GetProperty("content").GetString());
+        Assert.Equal("999888777666555444", mentions.GetProperty("roles")[0].GetString());
         Assert.Equal(0, mentions.GetProperty("parse").GetArrayLength());
         Assert.Equal(Red, payload.GetProperty("embeds")[0].GetProperty("color").GetInt32());
     }
@@ -287,10 +287,10 @@ public sealed class AlertTests
     [Fact]
     public async Task Chat_never_carries_the_role_whitelist()
     {
-        using var app = AppWithAlerts(("Discord:AlertRoleId", "1236350866370465793"));
+        using var app = AppWithAlerts(("Discord:AlertRoleId", "999888777666555444"));
 
         await app.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat",
-            Batch("kaelen", ChatBatches.Line("[GuildChat] Kaelen: <@&1236350866370465793> ping me")));
+            Batch("kaelen", ChatBatches.Line("[GuildChat] Kaelen: <@&999888777666555444> ping me")));
 
         var mentions = Single(app).GetProperty("allowed_mentions");
 
@@ -310,9 +310,9 @@ public sealed class AlertTests
     [Theory]
     [InlineData(null)]
     [InlineData("")]
-    [InlineData("<@&1236350866370465793>")]
+    [InlineData("<@&999888777666555444>")]
     [InlineData("everyone")]
-    [InlineData(" 1236350866370465793 ")]
+    [InlineData(" 999888777666555444 ")]
     [InlineData("123456789012345678901234567890")]
     public async Task An_absent_or_malformed_role_id_publishes_the_alert_without_a_ping(string? roleId)
     {
@@ -337,7 +337,7 @@ public sealed class AlertTests
     [Fact]
     public async Task A_second_alert_inside_the_window_publishes_without_pinging()
     {
-        using var app = AppWithAlerts(("Discord:AlertRoleId", "1236350866370465793"));
+        using var app = AppWithAlerts(("Discord:AlertRoleId", "999888777666555444"));
         var client = app.CreateAuthenticatedClient();
 
         await client.PostAsJsonAsync("/api/v1/chat",
@@ -350,7 +350,7 @@ public sealed class AlertTests
         var first = JsonDocument.Parse(app.Discord.RequestBodies[0]).RootElement;
         var second = JsonDocument.Parse(app.Discord.RequestBodies[1]).RootElement;
 
-        Assert.Equal("<@&1236350866370465793>", first.GetProperty("content").GetString());
+        Assert.Equal("<@&999888777666555444>", first.GetProperty("content").GetString());
 
         Assert.False(second.TryGetProperty("content", out _));
         Assert.False(second.GetProperty("allowed_mentions").TryGetProperty("roles", out _));
@@ -364,7 +364,7 @@ public sealed class AlertTests
     [Fact]
     public async Task Two_alerts_in_one_batch_ping_once()
     {
-        using var app = AppWithAlerts(("Discord:AlertRoleId", "1236350866370465793"));
+        using var app = AppWithAlerts(("Discord:AlertRoleId", "999888777666555444"));
 
         await app.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat", Batch("kaelen",
             ChatBatches.Line("[PvE World Boss] a Krayt Dragon has spawned!"),
@@ -372,7 +372,7 @@ public sealed class AlertTests
 
         var pinged = app.Discord.RequestBodies.Count(body =>
             JsonDocument.Parse(body).RootElement.TryGetProperty("content", out var content) &&
-            content.GetString()!.Contains("1236350866370465793"));
+            content.GetString()!.Contains("999888777666555444"));
 
         Assert.Equal(1, pinged);
     }
@@ -382,7 +382,7 @@ public sealed class AlertTests
     public async Task An_alert_after_the_window_pings_again()
     {
         using var app = AppWithAlerts(
-            ("Discord:AlertRoleId", "1236350866370465793"),
+            ("Discord:AlertRoleId", "999888777666555444"),
             ("Relay:AlertPingIntervalMinutes", "0"));
         var client = app.CreateAuthenticatedClient();
 
@@ -395,7 +395,7 @@ public sealed class AlertTests
 
         foreach (var body in app.Discord.RequestBodies)
         {
-            Assert.Equal("<@&1236350866370465793>",
+            Assert.Equal("<@&999888777666555444>",
                 JsonDocument.Parse(body).RootElement.GetProperty("content").GetString());
         }
     }
@@ -408,7 +408,7 @@ public sealed class AlertTests
     [Fact]
     public async Task Ordinary_chat_does_not_consume_the_ping_window()
     {
-        using var app = AppWithAlerts(("Discord:AlertRoleId", "1236350866370465793"));
+        using var app = AppWithAlerts(("Discord:AlertRoleId", "999888777666555444"));
         var client = app.CreateAuthenticatedClient();
 
         await client.PostAsJsonAsync("/api/v1/chat",
@@ -418,7 +418,7 @@ public sealed class AlertTests
 
         var alert = JsonDocument.Parse(app.Discord.RequestBodies[1]).RootElement;
 
-        Assert.Equal("<@&1236350866370465793>", alert.GetProperty("content").GetString());
+        Assert.Equal("<@&999888777666555444>", alert.GetProperty("content").GetString());
     }
 
     /// <summary>
@@ -434,7 +434,7 @@ public sealed class AlertTests
         var config = new Dictionary<string, string?>
         {
             ["Discord:AlertsEnabled"] = "true",
-            ["Discord:AlertRoleId"] = "1236350866370465793",
+            ["Discord:AlertRoleId"] = "999888777666555444",
             ["Relay:StateFilePath"] = statePath
         };
 
@@ -445,7 +445,7 @@ public sealed class AlertTests
                 await first.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat",
                     Batch("kaelen", ChatBatches.Line("[PvE World Boss] a Krayt Dragon has spawned!")));
 
-                Assert.Equal("<@&1236350866370465793>",
+                Assert.Equal("<@&999888777666555444>",
                     Single(first).GetProperty("content").GetString());
             }
 
@@ -480,7 +480,7 @@ public sealed class AlertTests
         try
         {
             using var app = AppWithAlerts(
-                ("Discord:AlertRoleId", "1236350866370465793"),
+                ("Discord:AlertRoleId", "999888777666555444"),
                 ("Relay:StateFilePath", statePath));
 
             // Prove the seeded stamp was actually loaded, so a rename of the state property cannot
@@ -492,7 +492,7 @@ public sealed class AlertTests
             await app.CreateAuthenticatedClient().PostAsJsonAsync("/api/v1/chat",
                 Batch("kaelen", ChatBatches.Line("[PvP World Boss] Bloodfin has spawned!")));
 
-            Assert.Equal("<@&1236350866370465793>", Single(app).GetProperty("content").GetString());
+            Assert.Equal("<@&999888777666555444>", Single(app).GetProperty("content").GetString());
 
             var health = await app.CreateClient().GetFromJsonAsync<JsonElement>("/api/v1/health");
             var stamped = health.GetProperty("relay").GetProperty("lastAlertPingUtc")

@@ -183,7 +183,7 @@ and everyone else is left alone. Leave it empty and alerts post silently, as bef
 
 <pre>"Discord": {
   "AlertsEnabled": true,
-  "AlertRoleId": "1236350866370465793"
+  "AlertRoleId": "999888777666555444"
 }</pre>
 
 <p>To find the ID: in Discord, turn on <em>Settings → Advanced → Developer Mode</em>, then
@@ -355,9 +355,10 @@ what's adjustable — change things only if you have a reason to.</p>
       off entirely.</td></tr>
   <tr><td><code>SelfPingUrl</code></td><td>the health page</td>
       <td>A web address the relay visits once per round to keep itself awake, needed on
-      hosting that puts idle apps to sleep. This host does, so it is filled in here
-      (<code>https://example.invalid/relay/api/v1/health</code>) — without it the
-      relay nods off when nobody is in game and the bot stops answering. It only keeps a
+      hosting that puts idle apps to sleep. This host does, so it is filled in here, pointed
+      at the relay's own health page (<code>https://&lt;your-relay-address&gt;/api/v1/health</code>)
+      — without it the relay nods off when nobody is in game and the bot stops answering.
+      It only keeps a
       <em>running</em> relay awake: to wake a sleeping one, have an uptime monitor visit
       the same health page every few minutes.</td></tr>
 </table>
